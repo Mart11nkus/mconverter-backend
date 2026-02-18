@@ -99,14 +99,14 @@ async def tg_send_audio(chat_id: int, mp3_path: Path, title: str):
     Sends mp3 to user via Telegram Bot API.
     - performer: @Martinkusconverter_bot
     - caption: English + tag
-    - thumb: bot_avatar.jpg (if exists)
+    - thumbnail: bot_avatar.jpg (if exists)
     """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
 
     caption_text = "Your audio file is ready 🎧\n\n@Martinkusconverter_bot"
 
     async with httpx.AsyncClient(timeout=180) as client:
-        # files: audio + optional thumb
+        # files: audio + optional thumbnail
         files = {}
         data = {
             "chat_id": str(chat_id),
@@ -123,10 +123,18 @@ async def tg_send_audio(chat_id: int, mp3_path: Path, title: str):
             try:
                 if THUMB_PATH.exists():
                     thumb_f = THUMB_PATH.open("rb")
-                    files["thumb"] = (THUMB_PATH.name, thumb_f, "image/jpeg")
+                    # ✅ ВАЖНО: для sendAudio нужно "thumbnail", а не "thumb"
+                    files["thumbnail"] = (THUMB_PATH.name, thumb_f, "image/jpeg")
+
                 r = await client.post(url, data=data, files=files)
-                r.raise_for_status()
-                return r.json()
+
+                # ✅ чтобы не было "ошибки нет" — проверяем реальный ответ Telegram
+                payload = r.json()
+                if not payload.get("ok", False):
+                    raise RuntimeError(f"Telegram sendAudio failed: {payload}")
+
+                return payload
+
             finally:
                 if thumb_f:
                     try:
@@ -222,3 +230,4 @@ async def upload_mp4(
     background_tasks.add_task(worker_convert_and_send, job_id, chat_id, in_path, out_title)
 
     return {"ok": True, "job_id": job_id, "status": "queued"}
+
