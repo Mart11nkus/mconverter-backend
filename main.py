@@ -79,6 +79,37 @@ def safe_filename(name: str) -> str:
     return cleaned or "upload.mp4"
 
 
+def clean_title(s: str, max_len: int = 48) -> str:
+    s = (s or "").strip()
+    # делаем приятные пробелы
+    s = s.replace("_", " ").replace("-", " ")
+    s = " ".join(s.split())
+
+    # оставляем только нормальные символы
+    allowed = set(" .()[]'’")
+    s = "".join(c for c in s if c.isalnum() or c in allowed).strip()
+
+    if not s:
+        s = "audio"
+
+    if len(s) > max_len:
+        s = s[:max_len].rstrip()
+
+    return s
+
+
+def nice_output_name(original_filename: str) -> Tuple[str, str]:
+    """
+    Возвращает:
+      - display_title: то, что будет в плеере Telegram (title)
+      - out_file_name: имя файла (как будет скачиваться)
+    """
+    base = Path(original_filename or "upload.mp4").stem
+    display_title = clean_title(base, max_len=48)
+    out_file_name = clean_title(base, max_len=40) + ".mp3"
+    return display_title, out_file_name
+
+
 def convert_mp4_to_mp3(in_path: Path, out_path: Path):
     cmd = [
         "ffmpeg", "-y",
@@ -94,19 +125,47 @@ def convert_mp4_to_mp3(in_path: Path, out_path: Path):
         raise RuntimeError(f"ffmpeg failed: {err}")
 
 
-async def tg_send_audio(chat_id: int, mp3_path: Path, title: str):
+def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
+    """
+    Вшивает cover (jpg) в mp3 через ffmpeg (ID3v2 APIC).
+    Это самый надежный способ, чтобы Telegram показывал обложку у аудио.
+    """
+    out_path = mp3_path.with_suffix(".cover.mp3")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(mp3_path),
+        "-i", str(cover_path),
+        "-map", "0:a",
+        "-map", "1:v",
+        "-c:a", "copy",
+        "-c:v", "mjpeg",
+        "-id3v2_version", "3",
+        "-metadata:s:v", "title=Album cover",
+        "-metadata:s:v", "comment=Cover (front)",
+        str(out_path),
+    ]
+
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0 or not out_path.exists():
+        err = (p.stderr or "")[-2000:]
+        raise RuntimeError(f"ffmpeg embed cover failed: {err}")
+
+    return out_path
+
+
+async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name: str):
     """
     Sends mp3 to user via Telegram Bot API.
-    - performer: @Martinkusconverter_bot
-    - caption: English + tag
-    - thumbnail: bot_avatar.jpg (if exists)
+    - title: то, что видно в плеере
+    - out_file_name: имя файла при скачивании
+    - thumbnail: bot_avatar.jpg (если существует)
     """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
 
     caption_text = "Your audio file is ready 🎧\n\n@Martinkusconverter_bot"
 
     async with httpx.AsyncClient(timeout=180) as client:
-        # files: audio + optional thumbnail
         files = {}
         data = {
             "chat_id": str(chat_id),
@@ -117,18 +176,17 @@ async def tg_send_audio(chat_id: int, mp3_path: Path, title: str):
         }
 
         with mp3_path.open("rb") as audio_f:
-            files["audio"] = (mp3_path.name, audio_f, "audio/mpeg")
+            # ВАЖНО: имя файла задаём тут (Telegram покажет его при скачивании)
+            files["audio"] = (out_file_name, audio_f, "audio/mpeg")
 
             thumb_f = None
             try:
+                # thumbnail (опционально) — даже если клиент игнорит, у нас есть embedded cover
                 if THUMB_PATH.exists():
                     thumb_f = THUMB_PATH.open("rb")
-                    # ✅ ВАЖНО: для sendAudio нужно "thumbnail", а не "thumb"
                     files["thumbnail"] = (THUMB_PATH.name, thumb_f, "image/jpeg")
 
                 r = await client.post(url, data=data, files=files)
-
-                # ✅ чтобы не было "ошибки нет" — проверяем реальный ответ Telegram
                 payload = r.json()
                 if not payload.get("ok", False):
                     raise RuntimeError(f"Telegram sendAudio failed: {payload}")
@@ -143,14 +201,37 @@ async def tg_send_audio(chat_id: int, mp3_path: Path, title: str):
                         pass
 
 
-async def worker_convert_and_send(job_id: str, chat_id: int, in_path: Path, out_title: str):
+async def worker_convert_and_send(
+    job_id: str,
+    chat_id: int,
+    in_path: Path,
+    display_title: str,
+    out_file_name: str
+):
     out_path = TMP_DIR / f"{job_id}.mp3"
+    cover_out_path: Path | None = None
+
     try:
         JOBS[job_id]["status"] = "converting"
         convert_mp4_to_mp3(in_path, out_path)
 
+        # ✅ Самый надежный вариант обложки: вшить внутрь mp3
+        if THUMB_PATH.exists():
+            JOBS[job_id]["status"] = "embedding_cover"
+            cover_out_path = embed_cover_into_mp3(out_path, THUMB_PATH)
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+            out_path = cover_out_path
+
         JOBS[job_id]["status"] = "sending"
-        await tg_send_audio(chat_id=chat_id, mp3_path=out_path, title=out_title)
+        await tg_send_audio(
+            chat_id=chat_id,
+            mp3_path=out_path,
+            title=display_title,
+            out_file_name=out_file_name
+        )
 
         JOBS[job_id]["status"] = "done"
     except Exception as e:
@@ -166,6 +247,12 @@ async def worker_convert_and_send(job_id: str, chat_id: int, in_path: Path, out_
         try:
             if out_path.exists():
                 out_path.unlink()
+        except Exception:
+            pass
+        # на всякий случай (если где-то поменяется логика)
+        try:
+            if cover_out_path and cover_out_path.exists():
+                cover_out_path.unlink()
         except Exception:
             pass
 
@@ -226,8 +313,15 @@ async def upload_mp4(
     # создаем job и отвечаем сразу
     JOBS[job_id] = {"job_id": job_id, "status": "queued"}
 
-    out_title = Path(in_name).stem + ".mp3"
-    background_tasks.add_task(worker_convert_and_send, job_id, chat_id, in_path, out_title)
+    display_title, out_file_name = nice_output_name(in_name)
+
+    background_tasks.add_task(
+        worker_convert_and_send,
+        job_id,
+        chat_id,
+        in_path,
+        display_title,
+        out_file_name
+    )
 
     return {"ok": True, "job_id": job_id, "status": "queued"}
-
