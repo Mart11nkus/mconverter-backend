@@ -108,11 +108,12 @@ def nice_output_name(original_filename: str) -> Tuple[str, str]:
     # если похоже на бессмысленный id (длинная строка без пробелов)
     if (" " not in base_clean) and (len(base_clean) >= 24):
         display_title = "Converted audio"
-        out_file_name = "mconverter_audio.mp3"
+        # уникализируем, чтобы Telegram не кешировал старое превью
+        out_file_name = f"mconverter_audio_{uuid.uuid4().hex[:6]}.mp3"
         return display_title, out_file_name
 
     display_title = clean_title(base, max_len=48)
-    out_file_name = clean_title(base, max_len=40) + ".mp3"
+    out_file_name = clean_title(base, max_len=40) + f"_{uuid.uuid4().hex[:4]}.mp3"
     return display_title, out_file_name
 
 
@@ -131,10 +132,39 @@ def convert_mp4_to_mp3(in_path: Path, out_path: Path):
         raise RuntimeError(f"ffmpeg failed: {err}")
 
 
+def prepare_cover_jpeg(src_cover: Path) -> Path:
+    """
+    Делает 'правильный' JPEG для Telegram/iOS:
+    - baseline (через ffmpeg)
+    - RGB-ish output (yuvj420p для jpeg)
+    - фикс 320x320 (с паддингом)
+    - без лишних метаданных
+    """
+    out = TMP_DIR / f"cover_{uuid.uuid4().hex}.jpg"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(src_cover),
+        "-vf",
+        "scale=320:320:force_original_aspect_ratio=decrease,"
+        "pad=320:320:(ow-iw)/2:(oh-ih)/2,"
+        "format=yuvj420p",
+        "-q:v", "3",
+        "-frames:v", "1",
+        str(out),
+    ]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0 or not out.exists():
+        err = (p.stderr or "")[-2000:]
+        raise RuntimeError(f"ffmpeg prepare cover failed: {err}")
+
+    return out
+
+
 def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
     """
     Вшивает cover (jpg) в mp3 через ffmpeg (ID3v2 APIC).
-    ✅ Добавлено -disposition attached_pic — это критично для Telegram/iOS.
+    ✅ -disposition attached_pic — критично для Telegram/iOS.
     """
     out_path = mp3_path.with_suffix(".cover.mp3")
 
@@ -146,7 +176,7 @@ def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
         "-map", "1:v:0",
         "-c:a", "copy",
         "-c:v", "mjpeg",
-        "-disposition:v:0", "attached_pic",   # ✅ важно
+        "-disposition:v:0", "attached_pic",
         "-id3v2_version", "3",
         "-write_id3v2", "1",
         "-metadata:s:v:0", "title=Album cover",
@@ -162,13 +192,13 @@ def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
     return out_path
 
 
-async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name: str):
+async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name: str, cover_for_thumb: Optional[Path] = None):
     """
     Sends mp3 to user via Telegram Bot API.
-    - performer: @Martinkusconverter_bot (как ты и хочешь)
+    - performer: @Martinkusconverter_bot (оставляем как ты хочешь)
     - title: то, что видно в плеере
     - out_file_name: имя файла при скачивании
-    - thumbnail: bot_avatar.jpg (если существует) — доп. вариант, но основной: embedded cover
+    - thumbnail: передаем уже нормализованный jpeg (cover_for_thumb), если есть
     """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
 
@@ -185,14 +215,13 @@ async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name:
         }
 
         with mp3_path.open("rb") as audio_f:
-            # имя файла при скачивании задаём здесь
             files["audio"] = (out_file_name, audio_f, "audio/mpeg")
 
             thumb_f = None
             try:
-                if THUMB_PATH.exists():
-                    thumb_f = THUMB_PATH.open("rb")
-                    files["thumbnail"] = (THUMB_PATH.name, thumb_f, "image/jpeg")
+                if cover_for_thumb and cover_for_thumb.exists():
+                    thumb_f = cover_for_thumb.open("rb")
+                    files["thumbnail"] = (cover_for_thumb.name, thumb_f, "image/jpeg")
 
                 r = await client.post(url, data=data, files=files)
                 payload = r.json()
@@ -218,15 +247,19 @@ async def worker_convert_and_send(
 ):
     out_path = TMP_DIR / f"{job_id}.mp3"
     cover_out_path: Optional[Path] = None
+    normalized_cover: Optional[Path] = None
 
     try:
         JOBS[job_id]["status"] = "converting"
         convert_mp4_to_mp3(in_path, out_path)
 
-        # ✅ Самый надежный вариант обложки: вшить внутрь mp3 как attached_pic
+        # ✅ Готовим 'правильную' обложку и вшиваем + даем ее как thumbnail
         if THUMB_PATH.exists():
+            JOBS[job_id]["status"] = "preparing_cover"
+            normalized_cover = prepare_cover_jpeg(THUMB_PATH)
+
             JOBS[job_id]["status"] = "embedding_cover"
-            cover_out_path = embed_cover_into_mp3(out_path, THUMB_PATH)
+            cover_out_path = embed_cover_into_mp3(out_path, normalized_cover)
             try:
                 out_path.unlink()
             except Exception:
@@ -238,7 +271,8 @@ async def worker_convert_and_send(
             chat_id=chat_id,
             mp3_path=out_path,
             title=display_title,
-            out_file_name=out_file_name
+            out_file_name=out_file_name,
+            cover_for_thumb=normalized_cover
         )
 
         JOBS[job_id]["status"] = "done"
@@ -260,6 +294,11 @@ async def worker_convert_and_send(
         try:
             if cover_out_path and cover_out_path.exists():
                 cover_out_path.unlink()
+        except Exception:
+            pass
+        try:
+            if normalized_cover and normalized_cover.exists():
+                normalized_cover.unlink()
         except Exception:
             pass
 
