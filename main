@@ -64,7 +64,25 @@ def safe_filename(name: str) -> str:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "ffmpeg": have_ffmpeg()}
+    return {
+        "ok": True,
+        "ffmpeg": have_ffmpeg(),
+        "bot_token_len": len(BOT_TOKEN),
+    }
+import urllib.request
+
+@app.get("/whoami")
+async def whoami():
+    if not BOT_TOKEN:
+        return {"ok": False, "error": "BOT_TOKEN is empty on server"}
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            body = r.read().decode("utf-8")
+        return json.loads(body)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @app.post("/upload-mp4")
 async def upload_mp4(
@@ -143,3 +161,4 @@ async def upload_mp4(
             pass
         # выходной файл чистить нельзя до отдачи, но Render обычно отдаёт сразу.
         # Если хочешь 100% гарант, можно сделать "background task", но пока так.
+
