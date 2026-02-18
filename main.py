@@ -40,6 +40,40 @@ from urllib.parse import parse_qsl
 
 def validate_init_data(init_data: str, bot_token: str):
     data = dict(parse_qsl(init_data, keep_blank_values=True))
+import os, hashlib, hmac
+from urllib.parse import parse_qsl
+import httpx
+from fastapi import Form
+
+@app.post("/debug-init")
+async def debug_init(init_data: str = Form(...)):
+    token = os.getenv("BOT_TOKEN", "")
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
+
+    received_hash = data.get("hash")
+    data_no_hash = dict(data)
+    data_no_hash.pop("hash", None)
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data_no_hash.items()))
+    secret_key = hashlib.sha256(token.encode()).digest() if token else b""
+    calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest() if token else ""
+
+    bot_username = None
+    if token:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+            js = r.json()
+            bot_username = js.get("result", {}).get("username")
+
+    return {
+        "bot_username": bot_username,
+        "token_len": len(token),
+        "received_hash": received_hash,
+        "calculated_hash": calculated_hash,
+        "equal": received_hash == calculated_hash,
+        "data_check_string_preview": data_check_string[:200],
+        "keys": sorted(list(data.keys())),
+    }
 
     received_hash = data.pop("hash", None)
     if not received_hash:
@@ -147,5 +181,6 @@ async def upload_mp4(
             raise HTTPException(status_code=500, detail=f"telegram send error: {e}")
 
     return {"ok": True}
+
 
 
