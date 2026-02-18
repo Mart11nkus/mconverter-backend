@@ -20,6 +20,9 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+# thumbnail (bot avatar) рядом с main.py
+THUMB_PATH = Path(__file__).parent / "bot_avatar.jpg"
+
 app = FastAPI(title=APP_NAME)
 
 app.add_middleware(
@@ -30,7 +33,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Простая память статусов (на free Render может сброситься при рестарте — для MVP ок)
+# простая память статусов (MVP)
 JOBS: Dict[str, Dict] = {}
 
 
@@ -76,17 +79,6 @@ def safe_filename(name: str) -> str:
     return cleaned or "upload.mp4"
 
 
-async def tg_send_audio(chat_id: int, mp3_path: Path, title: str = "Converted MP3"):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
-    async with httpx.AsyncClient(timeout=120) as client:
-        with mp3_path.open("rb") as f:
-            files = {"audio": (mp3_path.name, f, "audio/mpeg")}
-            data = {"chat_id": str(chat_id), "title": title}
-            r = await client.post(url, data=data, files=files)
-            r.raise_for_status()
-            return r.json()
-
-
 def convert_mp4_to_mp3(in_path: Path, out_path: Path):
     cmd = [
         "ffmpeg", "-y",
@@ -102,14 +94,55 @@ def convert_mp4_to_mp3(in_path: Path, out_path: Path):
         raise RuntimeError(f"ffmpeg failed: {err}")
 
 
-async def worker_convert_and_send(job_id: str, chat_id: int, in_path: Path, out_name: str):
+async def tg_send_audio(chat_id: int, mp3_path: Path, title: str):
+    """
+    Sends mp3 to user via Telegram Bot API.
+    - performer: @Martinkusconverter_bot
+    - caption: English + tag
+    - thumb: bot_avatar.jpg (if exists)
+    """
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
+
+    caption_text = "Your audio file is ready 🎧\n\n@Martinkusconverter_bot"
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        # files: audio + optional thumb
+        files = {}
+        data = {
+            "chat_id": str(chat_id),
+            "title": title,
+            "performer": "@Martinkusconverter_bot",
+            "caption": caption_text,
+            "parse_mode": "HTML",
+        }
+
+        with mp3_path.open("rb") as audio_f:
+            files["audio"] = (mp3_path.name, audio_f, "audio/mpeg")
+
+            thumb_f = None
+            try:
+                if THUMB_PATH.exists():
+                    thumb_f = THUMB_PATH.open("rb")
+                    files["thumb"] = (THUMB_PATH.name, thumb_f, "image/jpeg")
+                r = await client.post(url, data=data, files=files)
+                r.raise_for_status()
+                return r.json()
+            finally:
+                if thumb_f:
+                    try:
+                        thumb_f.close()
+                    except Exception:
+                        pass
+
+
+async def worker_convert_and_send(job_id: str, chat_id: int, in_path: Path, out_title: str):
     out_path = TMP_DIR / f"{job_id}.mp3"
     try:
         JOBS[job_id]["status"] = "converting"
         convert_mp4_to_mp3(in_path, out_path)
 
         JOBS[job_id]["status"] = "sending"
-        await tg_send_audio(chat_id=chat_id, mp3_path=out_path, title=out_name)
+        await tg_send_audio(chat_id=chat_id, mp3_path=out_path, title=out_title)
 
         JOBS[job_id]["status"] = "done"
     except Exception as e:
@@ -174,7 +207,7 @@ async def upload_mp4(
     in_name = safe_filename(file.filename)
     in_path = TMP_DIR / f"{job_id}_{in_name}"
 
-    # сохраняем файл быстро
+    # быстро сохраняем файл
     with in_path.open("wb") as f:
         while True:
             chunk = await file.read(1024 * 1024)
@@ -182,7 +215,7 @@ async def upload_mp4(
                 break
             f.write(chunk)
 
-    # регистрируем job и отвечаем СРАЗУ (важно для Telegram)
+    # создаем job и отвечаем сразу
     JOBS[job_id] = {"job_id": job_id, "status": "queued"}
 
     out_title = Path(in_name).stem + ".mp3"
