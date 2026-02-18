@@ -1,23 +1,27 @@
+import os
+import json
+import uuid
+import shutil
 import hashlib
 import hmac
-import json
-import os
-import shutil
-import tempfile
-import urllib.parse
-import asyncio
+import subprocess
+from pathlib import Path
 from typing import Dict, Tuple
+from urllib.parse import parse_qsl
 
-import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("No BOT_TOKEN env var set")
-
-app = FastAPI()
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
+APP_NAME = "mconverter-backend"
+TMP_DIR = Path("/tmp") / "mconverter"
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+
+app = FastAPI(title=APP_NAME)
+
+# CORS для Mini App (можно ужесточить позже)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,116 +30,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
-def parse_init_data(init_data: str) -> Dict[str, str]:
-    parsed = urllib.parse.parse_qs(init_data, strict_parsing=True)
-    return {k: v[0] for k, v in parsed.items()}
+def validate_telegram_init_data(init_data: str, bot_token: str) -> Tuple[bool, Dict[str, str]]:
+    """
+    Telegram WebApp initData validation:
+      - parse querystring
+      - remove 'hash'
+      - data_check_string: sorted key=value joined by '\n'
+      - secret_key = sha256(bot_token)
+      - calculated_hash = hmac_sha256(data_check_string, secret_key).hexdigest()
+    """
+    if not init_data or not bot_token:
+        return False, {}
 
-import hashlib
-import hmac
-from urllib.parse import parse_qsl
-
-def validate_init_data(init_data: str, bot_token: str):
     data = dict(parse_qsl(init_data, keep_blank_values=True))
-import os, hashlib, hmac
-from urllib.parse import parse_qsl
-import httpx
-from fastapi import Form
-
-@app.post("/debug-init")
-async def debug_init(init_data: str = Form(...)):
-    token = os.getenv("BOT_TOKEN", "")
-    data = dict(parse_qsl(init_data, keep_blank_values=True))
-
-    received_hash = data.get("hash")
-    data_no_hash = dict(data)
-    data_no_hash.pop("hash", None)
-
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data_no_hash.items()))
-    secret_key = hashlib.sha256(token.encode()).digest() if token else b""
-    calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest() if token else ""
-
-    bot_username = None
-    if token:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(f"https://api.telegram.org/bot{token}/getMe")
-            js = r.json()
-            bot_username = js.get("result", {}).get("username")
-
-    return {
-        "bot_username": bot_username,
-        "token_len": len(token),
-        "received_hash": received_hash,
-        "calculated_hash": calculated_hash,
-        "equal": received_hash == calculated_hash,
-        "data_check_string_preview": data_check_string[:200],
-        "keys": sorted(list(data.keys())),
-    }
-
     received_hash = data.pop("hash", None)
     if not received_hash:
         return False, {}
 
-    data_check_string = "\n".join(
-        f"{k}={v}" for k, v in sorted(data.items())
-    )
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret_key = hashlib.sha256(bot_token.encode("utf-8")).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    secret_key = hashlib.sha256(bot_token.encode()).digest()
+    ok = hmac.compare_digest(calculated_hash, received_hash)
+    return ok, data
 
-    calculated_hash = hmac.new(
-        secret_key,
-        data_check_string.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-    is_valid = hmac.compare_digest(calculated_hash, received_hash)
-
-    return is_valid, data
-
-    try:
-        data = parse_init_data(init_data)
-    except Exception:
-        return False, {}
-
-    hash_received = data.get("hash")
-    if not hash_received:
-        return False, data
-
-    items = []
-    for k, v in data.items():
-        if k == "hash":
-            continue
-        items.append(f"{k}={v}")
-    items.sort()
-    data_check_string = "\n".join(items)
-
-    secret_key = hashlib.sha256(bot_token.encode()).digest()
-    hash_calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(hash_calc, hash_received), data
-
-async def run_ffmpeg_mp4_to_mp3(mp4_path: str, mp3_path: str) -> None:
-    cmd = ["ffmpeg", "-y", "-i", mp4_path, "-vn", "-b:a", "192k", mp3_path]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, err = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(err.decode("utf-8", errors="ignore")[-2000:])
-
-async def send_audio_to_user(user_id: int, mp3_path: str, caption: str = "Готово ✅ MP3"):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
-    async with httpx.AsyncClient(timeout=180) as client:
-        with open(mp3_path, "rb") as f:
-            files = {"audio": ("audio.mp3", f, "audio/mpeg")}
-            data = {"chat_id": str(user_id), "caption": caption}
-            r = await client.post(url, data=data, files=files)
-            if r.status_code != 200:
-                raise RuntimeError(f"sendAudio failed: {r.status_code} {r.text}")
+def safe_filename(name: str) -> str:
+    # максимально просто и безопасно
+    name = name.replace("\\", "_").replace("/", "_")
+    return "".join(c for c in name if c.isalnum() or c in ("_", "-", ".", " ")).strip() or "upload.mp4"
 
 @app.get("/health")
 async def health():
@@ -149,38 +74,72 @@ async def upload_mp4(
     if not have_ffmpeg():
         raise HTTPException(status_code=500, detail="ffmpeg not installed on server")
 
-    ok, data = validate_init_data(init_data, BOT_TOKEN)
+    ok, data = validate_telegram_init_data(init_data, BOT_TOKEN)
     if not ok:
         raise HTTPException(status_code=401, detail="Bad initData signature")
 
+    # user в initData — это JSON строка
     user_json = data.get("user")
     if not user_json:
         raise HTTPException(status_code=400, detail="No user in initData")
-    user = json.loads(user_json)
-    user_id = int(user["id"])
 
-    with tempfile.TemporaryDirectory() as tmp:
-        mp4_path = os.path.join(tmp, "input.mp4")
-        mp3_path = os.path.join(tmp, "output.mp3")
+    try:
+        user = json.loads(user_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user json in initData")
 
-        with open(mp4_path, "wb") as out:
+    # минимальная привязка, чтобы было понятно кто грузит (можно убрать)
+    user_id = user.get("id")
+
+    # сохраняем mp4
+    job_id = uuid.uuid4().hex
+    in_name = safe_filename(file.filename or "upload.mp4")
+    in_path = TMP_DIR / f"{job_id}_{in_name}"
+    out_path = TMP_DIR / f"{job_id}.mp3"
+
+    try:
+        with in_path.open("wb") as f:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
-                out.write(chunk)
+                f.write(chunk)
 
+        # ffmpeg convert: extract audio to mp3
+        # -vn no video, -q:a quality
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(in_path),
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-q:a", "2",
+            str(out_path),
+        ]
+
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if p.returncode != 0 or not out_path.exists():
+            # вернем stderr (обрезанный)
+            err = (p.stderr or "")[-2000:]
+            raise HTTPException(status_code=500, detail=f"ffmpeg failed: {err}")
+
+        # отдаём mp3
+        filename = Path(in_name).stem + ".mp3"
+        return FileResponse(
+            path=str(out_path),
+            media_type="audio/mpeg",
+            filename=filename,
+            headers={
+                "X-User-Id": str(user_id) if user_id is not None else "unknown",
+                "Cache-Control": "no-store",
+            }
+        )
+
+    finally:
+        # входной файл чистим всегда
         try:
-            await run_ffmpeg_mp4_to_mp3(mp4_path, mp3_path)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"ffmpeg error: {e}")
-
-        try:
-            await send_audio_to_user(user_id, mp3_path)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"telegram send error: {e}")
-
-    return {"ok": True}
-
-
-
+            if in_path.exists():
+                in_path.unlink()
+        except Exception:
+            pass
+        # выходной файл чистить нельзя до отдачи, но Render обычно отдаёт сразу.
+        # Если хочешь 100% гарант, можно сделать "background task", но пока так.
