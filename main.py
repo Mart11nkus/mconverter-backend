@@ -16,6 +16,16 @@ if not BOT_TOKEN:
     raise RuntimeError("No BOT_TOKEN env var set")
 
 app = FastAPI()
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
@@ -111,3 +121,4 @@ async def upload_mp4(
             raise HTTPException(status_code=500, detail=f"telegram send error: {e}")
 
     return {"ok": True}
+
