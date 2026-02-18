@@ -7,7 +7,7 @@ import hmac
 import subprocess
 from pathlib import Path
 from urllib.parse import parse_qsl
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
@@ -81,11 +81,9 @@ def safe_filename(name: str) -> str:
 
 def clean_title(s: str, max_len: int = 48) -> str:
     s = (s or "").strip()
-    # делаем приятные пробелы
     s = s.replace("_", " ").replace("-", " ")
     s = " ".join(s.split())
 
-    # оставляем только нормальные символы
     allowed = set(" .()[]'’")
     s = "".join(c for c in s if c.isalnum() or c in allowed).strip()
 
@@ -105,6 +103,14 @@ def nice_output_name(original_filename: str) -> Tuple[str, str]:
       - out_file_name: имя файла (как будет скачиваться)
     """
     base = Path(original_filename or "upload.mp4").stem
+    base_clean = clean_title(base, max_len=80)
+
+    # если похоже на бессмысленный id (длинная строка без пробелов)
+    if (" " not in base_clean) and (len(base_clean) >= 24):
+        display_title = "Converted audio"
+        out_file_name = "mconverter_audio.mp3"
+        return display_title, out_file_name
+
     display_title = clean_title(base, max_len=48)
     out_file_name = clean_title(base, max_len=40) + ".mp3"
     return display_title, out_file_name
@@ -128,7 +134,7 @@ def convert_mp4_to_mp3(in_path: Path, out_path: Path):
 def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
     """
     Вшивает cover (jpg) в mp3 через ffmpeg (ID3v2 APIC).
-    Это самый надежный способ, чтобы Telegram показывал обложку у аудио.
+    ✅ Добавлено -disposition attached_pic — это критично для Telegram/iOS.
     """
     out_path = mp3_path.with_suffix(".cover.mp3")
 
@@ -137,12 +143,14 @@ def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
         "-i", str(mp3_path),
         "-i", str(cover_path),
         "-map", "0:a",
-        "-map", "1:v",
+        "-map", "1:v:0",
         "-c:a", "copy",
         "-c:v", "mjpeg",
+        "-disposition:v:0", "attached_pic",   # ✅ важно
         "-id3v2_version", "3",
-        "-metadata:s:v", "title=Album cover",
-        "-metadata:s:v", "comment=Cover (front)",
+        "-write_id3v2", "1",
+        "-metadata:s:v:0", "title=Album cover",
+        "-metadata:s:v:0", "comment=Cover (front)",
         str(out_path),
     ]
 
@@ -157,9 +165,10 @@ def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
 async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name: str):
     """
     Sends mp3 to user via Telegram Bot API.
+    - performer: @Martinkusconverter_bot (как ты и хочешь)
     - title: то, что видно в плеере
     - out_file_name: имя файла при скачивании
-    - thumbnail: bot_avatar.jpg (если существует)
+    - thumbnail: bot_avatar.jpg (если существует) — доп. вариант, но основной: embedded cover
     """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
 
@@ -176,12 +185,11 @@ async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name:
         }
 
         with mp3_path.open("rb") as audio_f:
-            # ВАЖНО: имя файла задаём тут (Telegram покажет его при скачивании)
+            # имя файла при скачивании задаём здесь
             files["audio"] = (out_file_name, audio_f, "audio/mpeg")
 
             thumb_f = None
             try:
-                # thumbnail (опционально) — даже если клиент игнорит, у нас есть embedded cover
                 if THUMB_PATH.exists():
                     thumb_f = THUMB_PATH.open("rb")
                     files["thumbnail"] = (THUMB_PATH.name, thumb_f, "image/jpeg")
@@ -209,13 +217,13 @@ async def worker_convert_and_send(
     out_file_name: str
 ):
     out_path = TMP_DIR / f"{job_id}.mp3"
-    cover_out_path: Path | None = None
+    cover_out_path: Optional[Path] = None
 
     try:
         JOBS[job_id]["status"] = "converting"
         convert_mp4_to_mp3(in_path, out_path)
 
-        # ✅ Самый надежный вариант обложки: вшить внутрь mp3
+        # ✅ Самый надежный вариант обложки: вшить внутрь mp3 как attached_pic
         if THUMB_PATH.exists():
             JOBS[job_id]["status"] = "embedding_cover"
             cover_out_path = embed_cover_into_mp3(out_path, THUMB_PATH)
@@ -249,7 +257,6 @@ async def worker_convert_and_send(
                 out_path.unlink()
         except Exception:
             pass
-        # на всякий случай (если где-то поменяется логика)
         try:
             if cover_out_path and cover_out_path.exists():
                 cover_out_path.unlink()
