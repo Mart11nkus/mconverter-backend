@@ -34,7 +34,33 @@ def parse_init_data(init_data: str) -> Dict[str, str]:
     parsed = urllib.parse.parse_qs(init_data, strict_parsing=True)
     return {k: v[0] for k, v in parsed.items()}
 
-def validate_init_data(init_data: str, bot_token: str) -> Tuple[bool, Dict[str, str]]:
+import hashlib
+import hmac
+from urllib.parse import parse_qsl
+
+def validate_init_data(init_data: str, bot_token: str):
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
+
+    received_hash = data.pop("hash", None)
+    if not received_hash:
+        return False, {}
+
+    data_check_string = "\n".join(
+        f"{k}={v}" for k, v in sorted(data.items())
+    )
+
+    secret_key = hashlib.sha256(bot_token.encode()).digest()
+
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    is_valid = hmac.compare_digest(calculated_hash, received_hash)
+
+    return is_valid, data
+
     try:
         data = parse_init_data(init_data)
     except Exception:
@@ -121,4 +147,5 @@ async def upload_mp4(
             raise HTTPException(status_code=500, detail=f"telegram send error: {e}")
 
     return {"ok": True}
+
 
