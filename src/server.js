@@ -67,12 +67,15 @@ app.post("/api/youtube/send", async (req, res) => {
 
     const info = await getInfo(url, cookiesPath);
     const { filePath } = await downloadVideoAndGetPath(url, cookiesPath);
+const fs = require("fs");
+console.log("DOWNLOADED:", filePath, "exists=", fs.existsSync(filePath));
 
     const tgResult = await sendMediaToUser({
       chat_id,
       filePath,
       title: info.title
     });
+try { fs.unlinkSync(filePath); } catch (_) {}
 
     res.json({ ok: true, telegram: tgResult });
   } catch (e) {
