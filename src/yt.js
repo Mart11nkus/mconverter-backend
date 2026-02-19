@@ -1,10 +1,17 @@
-// yt.js
+// src/yt.js
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-// запуск команд с логами stdout/stderr
+// ✅ используем standalone бинарник, чтобы не зависеть от Python
+function ytDlpBin() {
+  // bin/yt-dlp мы скачали в Build Command
+  // cwd при старте обычно корень проекта
+  const p = path.join(process.cwd(), "bin", "yt-dlp");
+  return p;
+}
+
 function run(command, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -24,7 +31,6 @@ function run(command, args) {
   });
 }
 
-// Render-safe папка
 function ensureTmpDir() {
   const dir = path.join(os.tmpdir(), "mconverter");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -52,11 +58,10 @@ async function getInfo(url, cookiesPath) {
     url,
   ];
 
-  const { out } = await run("yt-dlp", args);
+  const { out } = await run(ytDlpBin(), args);
   return JSON.parse(out);
 }
 
-// скачиваем и возвращаем РЕАЛЬНЫЙ путь
 async function downloadVideoAndGetPath(url, cookiesPath) {
   const outDir = ensureTmpDir();
 
@@ -86,9 +91,9 @@ async function downloadVideoAndGetPath(url, cookiesPath) {
     url,
   ];
 
-  const { out, err } = await run("yt-dlp", args);
+  const { out, err } = await run(ytDlpBin(), args);
 
-  const lines = out.split("\n").map(s => s.trim()).filter(Boolean);
+  const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
   const printedPath = lines[lines.length - 1];
 
   if (!printedPath) {
@@ -99,10 +104,7 @@ async function downloadVideoAndGetPath(url, cookiesPath) {
 
   if (!fs.existsSync(filePath)) {
     throw new Error(
-      `Downloaded file does not exist.\n` +
-      `printed="${printedPath}"\n` +
-      `resolved="${filePath}"\n` +
-      `${(err || out).slice(-4000)}`
+      `Downloaded file does not exist.\nprinted="${printedPath}"\nresolved="${filePath}"\n${(err || out).slice(-4000)}`
     );
   }
 
