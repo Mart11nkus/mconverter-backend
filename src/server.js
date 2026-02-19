@@ -20,9 +20,7 @@ app.use(
 );
 app.options("*", cors());
 
-/** ===== Body parsing =====
- * Тут JSON только для {url, chat_id}. Видео через JSON не шлём.
- */
+/** ===== Body parsing ===== */
 app.use(express.json({ limit: "2mb" }));
 
 /** ===== Helpers ===== */
@@ -30,7 +28,6 @@ function httpError(res, status, message, extra = {}) {
   return res.status(status).json({ ok: false, error: message, ...extra });
 }
 
-// Чтобы в Render логи были понятные:
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
 }
@@ -38,9 +35,6 @@ function log(...args) {
 /** ===== Routes ===== */
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-/**
- * Диагностика: проверяем что yt-dlp и ffmpeg реально доступны
- */
 app.get("/diag", async (req, res) => {
   try {
     const yt = await run("yt-dlp", ["--version"]);
@@ -55,9 +49,6 @@ app.get("/diag", async (req, res) => {
   }
 });
 
-/**
- * /api/youtube/info?url=...
- */
 app.get("/api/youtube/info", async (req, res) => {
   try {
     const url = req.query.url;
@@ -79,11 +70,6 @@ app.get("/api/youtube/info", async (req, res) => {
   }
 });
 
-/**
- * ГЛАВНОЕ:
- * WebApp -> POST /api/youtube/send
- * body: { url, chat_id }
- */
 app.post("/api/youtube/send", async (req, res) => {
   let filePath = null;
 
@@ -96,11 +82,9 @@ app.post("/api/youtube/send", async (req, res) => {
 
     const cookiesPath = ensureCookiesFile();
 
-    // 1) Получаем инфу (для названия)
     const info = await getInfo(url, cookiesPath);
     log("INFO OK:", { title: info?.title, id: info?.id, duration: info?.duration });
 
-    // 2) Скачиваем файл (Render-safe: /tmp)
     const dl = await downloadVideoAndGetPath(url, cookiesPath);
     filePath = dl.filePath;
 
@@ -110,7 +94,6 @@ app.post("/api/youtube/send", async (req, res) => {
       throw new Error(`Downloaded file not found: ${filePath || "(empty)"}`);
     }
 
-    // 3) Отправляем в Telegram
     const tgResult = await sendMediaToUser({
       chat_id,
       filePath,
@@ -119,13 +102,11 @@ app.post("/api/youtube/send", async (req, res) => {
 
     log("TG SENT OK:", tgResult);
 
-    // 4) Ответ клиенту
-    res.json({ ok: true, telegram: tgResult });
+    return res.json({ ok: true, telegram: tgResult });
   } catch (e) {
     log("SEND ERROR:", e.message);
     return httpError(res, 500, e.message);
   } finally {
-    // 5) Чистим файл (чтобы /tmp не забивался)
     if (filePath) {
       try {
         fs.unlinkSync(filePath);
