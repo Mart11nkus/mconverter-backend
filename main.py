@@ -5,8 +5,10 @@ import shutil
 import hashlib
 import hmac
 import subprocess
+import socket
+import ipaddress
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 from typing import Dict, Tuple, Optional
 
 import httpx
@@ -22,6 +24,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 # thumbnail (bot avatar) рядом с main.py
 THUMB_PATH = Path(__file__).parent / "bot_avatar.jpg"
+
+# Опциональный лимит скачивания (если хочешь): MAX_DOWNLOAD_MB=500
+MAX_DOWNLOAD_MB = os.getenv("MAX_DOWNLOAD_MB", "").strip()
+MAX_DOWNLOAD_BYTES: Optional[int] = None
+if MAX_DOWNLOAD_MB.isdigit():
+    MAX_DOWNLOAD_BYTES = int(MAX_DOWNLOAD_MB) * 1024 * 1024
+
+# Ограничим описание, чтобы не улететь в лимиты Telegram
+MAX_DESC_CHARS = 800
 
 app = FastAPI(title=APP_NAME)
 
@@ -39,6 +50,10 @@ JOBS: Dict[str, Dict] = {}
 
 def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
+
+
+def have_ytdlp() -> bool:
+    return shutil.which("yt-dlp") is not None
 
 
 def validate_telegram_webapp_init_data(init_data: str, bot_token: str) -> Tuple[bool, Dict[str, str]]:
@@ -108,13 +123,79 @@ def nice_output_name(original_filename: str) -> Tuple[str, str]:
     # если похоже на бессмысленный id (длинная строка без пробелов)
     if (" " not in base_clean) and (len(base_clean) >= 24):
         display_title = "Converted audio"
-        # уникализируем, чтобы Telegram не кешировал старое превью
         out_file_name = f"mconverter_audio_{uuid.uuid4().hex[:6]}.mp3"
         return display_title, out_file_name
 
     display_title = clean_title(base, max_len=48)
     out_file_name = clean_title(base, max_len=40) + f"_{uuid.uuid4().hex[:4]}.mp3"
     return display_title, out_file_name
+
+
+def nice_output_from_meta(title: Optional[str]) -> Tuple[str, str]:
+    base = clean_title(title or "Converted audio", max_len=48)
+    if not base:
+        display_title = "Converted audio"
+        out_file_name = f"mconverter_audio_{uuid.uuid4().hex[:6]}.mp3"
+        return display_title, out_file_name
+
+    display_title = base
+    out_file_name = clean_title(base, max_len=40) + f"_{uuid.uuid4().hex[:4]}.mp3"
+    return display_title, out_file_name
+
+
+def sanitize_description(desc: Optional[str]) -> str:
+    if not desc:
+        return ""
+    desc = desc.strip()
+    if not desc:
+        return ""
+    desc = "\n".join(line.rstrip() for line in desc.splitlines())
+    if len(desc) > MAX_DESC_CHARS:
+        desc = desc[:MAX_DESC_CHARS].rstrip() + "…"
+    return desc
+
+
+def ensure_public_http_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Empty url")
+
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https urls are allowed")
+    if not p.netloc:
+        raise HTTPException(status_code=400, detail="Invalid url: missing host")
+
+    host = p.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid url host")
+
+    if host in ("localhost",):
+        raise HTTPException(status_code=400, detail="Localhost urls are not allowed")
+
+    # SSRF защита: резолвим и баним приватные/локальные диапазоны
+    try:
+        infos = socket.getaddrinfo(host, None)
+        ips = []
+        for info in infos:
+            ips.append(info[4][0])
+        for ip in set(ips):
+            ip_obj = ipaddress.ip_address(ip)
+            if (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                raise HTTPException(status_code=400, detail="Private/local network urls are not allowed")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not resolve url host")
+
+    return url
 
 
 def convert_mp4_to_mp3(in_path: Path, out_path: Path):
@@ -134,11 +215,7 @@ def convert_mp4_to_mp3(in_path: Path, out_path: Path):
 
 def prepare_cover_jpeg(src_cover: Path) -> Path:
     """
-    Делает 'правильный' JPEG для Telegram/iOS:
-    - baseline (через ffmpeg)
-    - RGB-ish output (yuvj420p для jpeg)
-    - фикс 320x320 (с паддингом)
-    - без лишних метаданных
+    Делает 'правильный' JPEG для Telegram/iOS
     """
     out = TMP_DIR / f"cover_{uuid.uuid4().hex}.jpg"
 
@@ -192,19 +269,85 @@ def embed_cover_into_mp3(mp3_path: Path, cover_path: Path) -> Path:
     return out_path
 
 
-async def tg_send_audio(chat_id: int, mp3_path: Path, title: str, out_file_name: str, cover_for_thumb: Optional[Path] = None):
+def ytdlp_extract_info(url: str) -> Dict:
+    """
+    Метаданные (title/description) через yt-dlp --dump-single-json, без скачивания.
+    """
+    cmd = [
+        "yt-dlp",
+        "--no-warnings",
+        "--dump-single-json",
+        "--no-playlist",
+        url,
+    ]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout or "")[-2000:]
+        raise RuntimeError(f"yt-dlp info failed: {err}")
+
+    try:
+        return json.loads(p.stdout)
+    except Exception:
+        raise RuntimeError("yt-dlp returned invalid json")
+
+
+def ytdlp_download(url: str, out_template: str):
+    """
+    Скачивание через yt-dlp. Берём bestaudio/best и мёржим в mp4 (если надо).
+    """
+    cmd = [
+        "yt-dlp",
+        "--no-warnings",
+        "--no-playlist",
+        "-f", "bestaudio/best",
+        "--merge-output-format", "mp4",
+        "-o", out_template,
+        url,
+    ]
+
+    if MAX_DOWNLOAD_BYTES is not None:
+        cmd.insert(1, "--max-filesize")
+        cmd.insert(2, f"{int(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M")
+
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout or "")[-2000:]
+        raise RuntimeError(f"yt-dlp download failed: {err}")
+
+
+def find_downloaded_file(job_id: str) -> Optional[Path]:
+    candidates = sorted(
+        TMP_DIR.glob(f"{job_id}_download.*"),
+        key=lambda x: x.stat().st_mtime,
+        reverse=True
+    )
+    return candidates[0] if candidates else None
+
+
+async def tg_send_audio(
+    chat_id: int,
+    mp3_path: Path,
+    title: str,
+    out_file_name: str,
+    description: str = "",
+    cover_for_thumb: Optional[Path] = None
+):
     """
     Sends mp3 to user via Telegram Bot API.
-    - performer: @Martinkusconverter_bot (оставляем как ты хочешь)
+    - performer: @Martinkusconverter_bot (как ты хочешь)
     - title: то, что видно в плеере
     - out_file_name: имя файла при скачивании
-    - thumbnail: передаем уже нормализованный jpeg (cover_for_thumb), если есть
+    - description: добавим в caption (обрезано)
     """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
 
-    caption_text = "Your audio file is ready 🎧\n\n@Martinkusconverter_bot"
+    desc = sanitize_description(description)
+    if desc:
+        caption_text = f"{desc}\n\nYour audio file is ready 🎧\n\n@Martinkusconverter_bot"
+    else:
+        caption_text = "Your audio file is ready 🎧\n\n@Martinkusconverter_bot"
 
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=240) as client:
         files = {}
         data = {
             "chat_id": str(chat_id),
@@ -243,7 +386,8 @@ async def worker_convert_and_send(
     chat_id: int,
     in_path: Path,
     display_title: str,
-    out_file_name: str
+    out_file_name: str,
+    description: str = ""
 ):
     out_path = TMP_DIR / f"{job_id}.mp3"
     cover_out_path: Optional[Path] = None
@@ -253,7 +397,6 @@ async def worker_convert_and_send(
         JOBS[job_id]["status"] = "converting"
         convert_mp4_to_mp3(in_path, out_path)
 
-        # ✅ Готовим 'правильную' обложку и вшиваем + даем ее как thumbnail
         if THUMB_PATH.exists():
             JOBS[job_id]["status"] = "preparing_cover"
             normalized_cover = prepare_cover_jpeg(THUMB_PATH)
@@ -272,6 +415,7 @@ async def worker_convert_and_send(
             mp3_path=out_path,
             title=display_title,
             out_file_name=out_file_name,
+            description=description,
             cover_for_thumb=normalized_cover
         )
 
@@ -281,31 +425,56 @@ async def worker_convert_and_send(
         JOBS[job_id]["error"] = str(e)[:1500]
     finally:
         # cleanup
+        for p in [in_path, out_path, cover_out_path, normalized_cover]:
+            try:
+                if p and isinstance(p, Path) and p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+
+
+async def worker_download_convert_and_send(job_id: str, chat_id: int, url: str):
+    downloaded: Optional[Path] = None
+    try:
+        JOBS[job_id]["status"] = "downloading"
+
+        info = ytdlp_extract_info(url)
+        title = info.get("title") or "Converted audio"
+        description = info.get("description") or ""
+
+        display_title, out_file_name = nice_output_from_meta(title)
+
+        out_template = str(TMP_DIR / f"{job_id}_download.%(ext)s")
+        ytdlp_download(url, out_template)
+
+        downloaded = find_downloaded_file(job_id)
+        if not downloaded or not downloaded.exists():
+            raise RuntimeError("Download finished, but file not found")
+
+        JOBS[job_id]["status"] = "downloaded"
+
+        await worker_convert_and_send(
+            job_id=job_id,
+            chat_id=chat_id,
+            in_path=downloaded,
+            display_title=display_title,
+            out_file_name=out_file_name,
+            description=description
+        )
+
+    except Exception as e:
+        JOBS[job_id]["status"] = "error"
+        JOBS[job_id]["error"] = str(e)[:1500]
         try:
-            if in_path.exists():
-                in_path.unlink()
-        except Exception:
-            pass
-        try:
-            if out_path.exists():
-                out_path.unlink()
-        except Exception:
-            pass
-        try:
-            if cover_out_path and cover_out_path.exists():
-                cover_out_path.unlink()
-        except Exception:
-            pass
-        try:
-            if normalized_cover and normalized_cover.exists():
-                normalized_cover.unlink()
+            if downloaded and downloaded.exists():
+                downloaded.unlink()
         except Exception:
             pass
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "ffmpeg": have_ffmpeg()}
+    return {"ok": True, "ffmpeg": have_ffmpeg(), "yt_dlp": have_ytdlp()}
 
 
 @app.get("/job-status/{job_id}")
@@ -357,7 +526,7 @@ async def upload_mp4(
             f.write(chunk)
 
     # создаем job и отвечаем сразу
-    JOBS[job_id] = {"job_id": job_id, "status": "queued"}
+    JOBS[job_id] = {"job_id": job_id, "status": "queued", "source": "upload"}
 
     display_title, out_file_name = nice_output_name(in_name)
 
@@ -369,5 +538,49 @@ async def upload_mp4(
         display_title,
         out_file_name
     )
+
+    return {"ok": True, "job_id": job_id, "status": "queued"}
+
+
+@app.post("/download-by-url")
+async def download_by_url(
+    background_tasks: BackgroundTasks,
+    url: str = Form(...),
+    init_data: str = Form(...),
+):
+    """
+    Принимает ссылку (YouTube/TikTok/Instagram и т.п.), качает через yt-dlp,
+    конвертирует в mp3 и отправляет пользователю через бота.
+    """
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="Server misconfigured: BOT_TOKEN missing")
+    if not have_ffmpeg():
+        raise HTTPException(status_code=500, detail="ffmpeg not installed on server")
+    if not have_ytdlp():
+        raise HTTPException(status_code=500, detail="yt-dlp not installed on server")
+
+    ok, data = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Bad initData signature")
+
+    user_json = data.get("user")
+    if not user_json:
+        raise HTTPException(status_code=400, detail="No user in initData")
+
+    try:
+        user = json.loads(user_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user json in initData")
+
+    chat_id = user.get("id")
+    if not isinstance(chat_id, int):
+        raise HTTPException(status_code=400, detail="No valid user id in initData")
+
+    url = ensure_public_http_url(url)
+
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"job_id": job_id, "status": "queued", "source": "url"}
+
+    background_tasks.add_task(worker_download_convert_and_send, job_id, chat_id, url)
 
     return {"ok": True, "job_id": job_id, "status": "queued"}
