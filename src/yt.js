@@ -32,18 +32,31 @@ async function getInfo(url, cookiesPath) {
   return JSON.parse(out);
 }
 
-async function downloadVideo(url, cookiesPath) {
+// Скачиваем и возвращаем ПОЛНЫЙ путь к файлу через --print after_move:filepath
+async function downloadVideoAndGetPath(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
-    "--no-warnings",
+
+    // делаем выход более стабильным для Telegram
     "-f", "bv*+ba/best",
+    "--merge-output-format", "mp4",
+
     "-o", "downloads/%(title).200B [%(id)s].%(ext)s",
+
+    "--print", "after_move:filepath",
+    "--no-warnings",
     url
   ];
 
   const { out } = await run("yt-dlp", args);
-  return out;
+
+  // yt-dlp может печатать несколько строк, берём последнюю непустую
+  const lines = out.split("\n").map(s => s.trim()).filter(Boolean);
+  const filePath = lines[lines.length - 1];
+
+  if (!filePath) throw new Error("Cannot determine downloaded file path");
+  return { filePath, log: out };
 }
 
-module.exports = { run, getInfo, downloadVideo };
+module.exports = { run, getInfo, downloadVideoAndGetPath };
