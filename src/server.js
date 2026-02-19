@@ -56,6 +56,29 @@ app.post("/api/youtube/info", async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+app.post("/api/youtube/debug", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ ok: false, error: "url is required" });
+
+    const cookiesPath = ensureCookiesFile();
+
+    const args = [
+      "--cookies", cookiesPath,
+      "--add-header", "User-Agent: Mozilla/5.0",
+      "-v",
+      "--no-warnings",
+      "--dump-json",
+      url
+    ];
+
+    const r = await run("yt-dlp", args);
+    res.json({ ok: true, tail: (r.out || "").slice(-4000) });
+  } catch (e) {
+    // вот это и есть причина
+    res.status(500).json({ ok: false, error: e.message.slice(-6000) });
+  }
+});
 
 app.post("/api/youtube/download", async (req, res) => {
   try {
