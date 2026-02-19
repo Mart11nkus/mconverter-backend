@@ -4,12 +4,8 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-// ✅ используем standalone бинарник, чтобы не зависеть от Python
 function ytDlpBin() {
-  // bin/yt-dlp мы скачали в Build Command
-  // cwd при старте обычно корень проекта
-  const p = path.join(process.cwd(), "bin", "yt-dlp");
-  return p;
+  return path.join(process.cwd(), "bin", "yt-dlp");
 }
 
 function run(command, args) {
@@ -22,7 +18,9 @@ function run(command, args) {
     p.stdout.on("data", (d) => (out += d.toString()));
     p.stderr.on("data", (d) => (err += d.toString()));
 
-    p.on("error", (e) => reject(new Error(`${command} spawn error: ${e.message}`)));
+    p.on("error", (e) =>
+      reject(new Error(`${command} spawn error: ${e.message}`))
+    );
 
     p.on("close", (code) => {
       if (code === 0) return resolve({ out, err });
@@ -49,9 +47,6 @@ async function getInfo(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
-    "--sleep-interval", "1",
-    "--max-sleep-interval", "3",
-    "--extractor-args", "youtube:player_client=web",
     "--geo-bypass",
     "--dump-json",
     "--no-warnings",
@@ -77,14 +72,12 @@ async function downloadVideoAndGetPath(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
-    "--sleep-interval", "1",
-    "--max-sleep-interval", "3",
-    "--extractor-args", "youtube:player_client=web",
     "--geo-bypass",
 
-    "-f", "bv*+ba/best",
-    "--merge-output-format", "mp4",
+    // 🔥 более гибкий формат (не падает на большинстве видео)
+    "-f", "bestvideo*+bestaudio/best",
 
+    "--merge-output-format", "mp4",
     "-o", outTemplate,
     "--print", "after_move:filepath",
     "--no-warnings",
@@ -97,10 +90,14 @@ async function downloadVideoAndGetPath(url, cookiesPath) {
   const printedPath = lines[lines.length - 1];
 
   if (!printedPath) {
-    throw new Error(`Cannot determine downloaded file path.\n${(err || out).slice(-4000)}`);
+    throw new Error(
+      `Cannot determine downloaded file path.\n${(err || out).slice(-4000)}`
+    );
   }
 
-  const filePath = path.isAbsolute(printedPath) ? printedPath : path.join(outDir, printedPath);
+  const filePath = path.isAbsolute(printedPath)
+    ? printedPath
+    : path.join(outDir, printedPath);
 
   if (!fs.existsSync(filePath)) {
     throw new Error(
