@@ -2,6 +2,7 @@
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
+const crypto = require("crypto");
 const { downloadAudioAndGetPath } = require("./yt");
 const { sendMediaToUser } = require("./tg");
 
@@ -19,44 +20,109 @@ function log(...args) {
   console.log(new Date().toISOString(), ...args);
 }
 
-function httpError(res, status, message, extra = {}) {
-  return res.status(status).json({ ok: false, error: message, ...extra });
+// Хранилище джобов в памяти
+const jobs = new Map();
+
+function createJob() {
+  const id = crypto.randomUUID();
+  jobs.set(id, { status: "queued", error: null });
+  return id;
+}
+
+function setJob(id, data) {
+  jobs.set(id, { ...jobs.get(id), ...data });
 }
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "50mb" }));
 
 app.get("/", (req, res) => res.send("ok"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Главный эндпоинт — скачать аудио через Cobalt и отправить MP3 в Telegram
-app.post("/api/youtube/send", async (req, res) => {
-  let filePath = null;
-  try {
-    const { url, chat_id } = req.body || {};
-    if (!url) return httpError(res, 400, "url is required");
-    if (!chat_id) return httpError(res, 400, "chat_id is required");
+// ✅ Статус джоба — Mini App постоянно его опрашивает
+app.get("/job-status/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ status: "error", error: "Job not found" });
+  res.json(job);
+});
 
-    log("SEND START:", { url, chat_id });
+// ✅ Главный эндпоинт — Mini App шлёт сюда ссылку
+app.post("/download-by-url", async (req, res) => {
+  // Mini App шлёт FormData
+  let url, initData;
 
-    const dl = await downloadAudioAndGetPath(url);
-    filePath = dl.filePath;
-    const title = dl.title;
+  const contentType = req.headers["content-type"] || "";
 
-    log("DOWNLOADED:", { filePath, title });
-
-    const tgResult = await sendMediaToUser({ chat_id, filePath, title });
-    log("TG SENT OK");
-
-    return res.json({ ok: true });
-  } catch (e) {
-    log("SEND ERROR:", e?.message || String(e));
-    return httpError(res, 500, e?.message || "send failed");
-  } finally {
-    if (filePath) {
-      try { fs.unlinkSync(filePath); } catch (_) {}
-    }
+  if (contentType.includes("multipart/form-data")) {
+    // Парсим FormData
+    const multer = require("multer");
+    const upload = multer().none();
+    await new Promise((resolve, reject) => {
+      upload(req, res, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    url = req.body?.url;
+    initData = req.body?.init_data;
+  } else {
+    url = req.body?.url;
+    initData = req.body?.init_data;
   }
+
+  if (!url) return res.status(400).json({ ok: false, detail: "url is required" });
+  if (!initData) return res.status(400).json({ ok: false, detail: "Открой из Telegram" });
+
+  // Достаём chat_id из initData
+  let chat_id;
+  try {
+    const params = new URLSearchParams(initData);
+    const userStr = params.get("user");
+    if (!userStr) throw new Error("no user");
+    const user = JSON.parse(userStr);
+    chat_id = user.id;
+  } catch (e) {
+    return res.status(400).json({ ok: false, detail: "Не удалось получить user из Telegram" });
+  }
+
+  // Создаём джоб и сразу отвечаем Mini App
+  const jobId = createJob();
+  res.json({ ok: true, job_id: jobId });
+
+  // Дальше работаем в фоне
+  (async () => {
+    let filePath = null;
+    try {
+      setJob(jobId, { status: "downloading" });
+      log("DOWNLOAD START:", { url, chat_id });
+
+      const dl = await downloadAudioAndGetPath(url);
+      filePath = dl.filePath;
+      const title = dl.title;
+
+      setJob(jobId, { status: "sending" });
+      log("SENDING:", { filePath, title, chat_id });
+
+      await sendMediaToUser({ chat_id, filePath, title });
+
+      setJob(jobId, { status: "done" });
+      log("DONE:", { jobId });
+    } catch (e) {
+      log("ERROR:", e?.message);
+      setJob(jobId, { status: "error", error: e?.message || "unknown error" });
+    } finally {
+      if (filePath) {
+        try { fs.unlinkSync(filePath); } catch (_) {}
+      }
+      // Удаляем джоб из памяти через 10 минут
+      setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
+    }
+  })();
+});
+
+// Заглушка для upload-mp4 (если нажмут кнопку файла)
+app.post("/upload-mp4", (req, res) => {
+  res.status(400).json({ ok: false, detail: "Загрузка файлов пока не поддерживается" });
 });
 
 const PORT = Number(process.env.PORT || 3000);
