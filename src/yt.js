@@ -23,6 +23,10 @@ async function getInfo(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
+    "--sleep-interval", "1",
+    "--max-sleep-interval", "3",
+    "--extractor-args", "youtube:player_client=web",
+    "--geo-bypass",
     "--dump-json",
     "--no-warnings",
     url
@@ -32,13 +36,16 @@ async function getInfo(url, cookiesPath) {
   return JSON.parse(out);
 }
 
-// Скачиваем и возвращаем ПОЛНЫЙ путь к файлу через --print after_move:filepath
+// ✅ скачиваем и возвращаем путь к файлу (для отправки в TG)
 async function downloadVideoAndGetPath(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
+    "--sleep-interval", "1",
+    "--max-sleep-interval", "3",
+    "--extractor-args", "youtube:player_client=web",
+    "--geo-bypass",
 
-    // делаем выход более стабильным для Telegram
     "-f", "bv*+ba/best",
     "--merge-output-format", "mp4",
 
@@ -50,8 +57,6 @@ async function downloadVideoAndGetPath(url, cookiesPath) {
   ];
 
   const { out } = await run("yt-dlp", args);
-
-  // yt-dlp может печатать несколько строк, берём последнюю непустую
   const lines = out.split("\n").map(s => s.trim()).filter(Boolean);
   const filePath = lines[lines.length - 1];
 
