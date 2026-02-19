@@ -33,7 +33,7 @@ app.get("/diag", async (req, res) => {
   }
 });
 
-// ✅ Проверка в браузере:
+// ✅ удобная проверка в браузере:
 // /api/youtube/info?url=...
 app.get("/api/youtube/info", async (req, res) => {
   try {
@@ -55,9 +55,8 @@ app.get("/api/youtube/info", async (req, res) => {
   }
 });
 
-// ✅ ГЛАВНОЕ: скачать и отправить пользователю в Telegram
-// POST /api/youtube/send
-// body: { "url": "...", "chat_id": 123456789 }
+// ✅ ГЛАВНОЕ: WebApp вызывает это, и бот отправляет файл пользователю
+// body: { url: "...", chat_id: Telegram.WebApp.initDataUnsafe.user.id }
 app.post("/api/youtube/send", async (req, res) => {
   try {
     const { url, chat_id } = req.body || {};
@@ -66,13 +65,9 @@ app.post("/api/youtube/send", async (req, res) => {
 
     const cookiesPath = ensureCookiesFile();
 
-    // 1) получаем мету (название для подписи)
     const info = await getInfo(url, cookiesPath);
-
-    // 2) скачиваем и узнаём путь к файлу
     const { filePath } = await downloadVideoAndGetPath(url, cookiesPath);
 
-    // 3) отправляем пользователю
     const tgResult = await sendMediaToUser({
       chat_id,
       filePath,
