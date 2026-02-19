@@ -2,7 +2,7 @@ const { spawn } = require("child_process");
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const p = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(command, args);
 
     let out = "";
     let err = "";
@@ -11,13 +11,13 @@ function run(command, args) {
     p.stderr.on("data", (d) => (err += d.toString()));
 
     p.on("close", (code) => {
-      if (code === 0) return resolve({ out, err });
-      reject(new Error(`${command} failed (code ${code}):\n${err || out}`));
+      if (code === 0) return resolve(out);
+      reject(new Error(err || out));
     });
   });
 }
 
-async function ytInfo({ url, cookiesPath }) {
+async function getInfo(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
@@ -25,11 +25,12 @@ async function ytInfo({ url, cookiesPath }) {
     "--no-warnings",
     url
   ];
-  const { out } = await run("yt-dlp", args);
-  return JSON.parse(out);
+
+  const output = await run("yt-dlp", args);
+  return JSON.parse(output);
 }
 
-async function ytDownload({ url, cookiesPath }) {
+async function downloadVideo(url, cookiesPath) {
   const args = [
     "--cookies", cookiesPath,
     "--add-header", "User-Agent: Mozilla/5.0",
@@ -38,8 +39,8 @@ async function ytDownload({ url, cookiesPath }) {
     "-o", "downloads/%(title).200B [%(id)s].%(ext)s",
     url
   ];
-  const { out } = await run("yt-dlp", args);
-  return out;
+
+  return await run("yt-dlp", args);
 }
 
-module.exports = { ytInfo, ytDownload };
+module.exports = { getInfo, downloadVideo };
