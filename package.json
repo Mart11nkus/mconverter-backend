@@ -4,11 +4,15 @@
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "postinstall": "mkdir -p bin && (curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o bin/yt-dlp || wget -O bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux) && chmod +x bin/yt-dlp"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "form-data": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
