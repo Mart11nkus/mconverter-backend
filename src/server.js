@@ -1,10 +1,9 @@
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
 
 const { ensureCookiesFile } = require("./cookies");
-const { run, getInfo, downloadVideo } = require("./yt");
+const { run, getInfo, downloadVideoAndGetPath } = require("./yt");
+const { sendMediaToUser } = require("./tg");
 
 const app = express();
 
@@ -18,10 +17,8 @@ app.options("*", cors());
 
 app.use(express.json({ limit: "2mb" }));
 
-// ✅ health check
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ diag: проверка что yt-dlp и ffmpeg реально стоят
 app.get("/diag", async (req, res) => {
   try {
     const yt = await run("yt-dlp", ["--version"]);
@@ -36,12 +33,8 @@ app.get("/diag", async (req, res) => {
   }
 });
 
-//
-// ✅ GET-версии для проверки прямо в браузере:
+// ✅ Проверка в браузере:
 // /api/youtube/info?url=...
-// /api/youtube/download?url=...
-//
-
 app.get("/api/youtube/info", async (req, res) => {
   try {
     const url = req.query.url;
@@ -62,59 +55,31 @@ app.get("/api/youtube/info", async (req, res) => {
   }
 });
 
-app.get("/api/youtube/download", async (req, res) => {
+// ✅ ГЛАВНОЕ: скачать и отправить пользователю в Telegram
+// POST /api/youtube/send
+// body: { "url": "...", "chat_id": 123456789 }
+app.post("/api/youtube/send", async (req, res) => {
   try {
-    const url = req.query.url;
-    if (!url) return res.status(400).json({ ok: false, error: "url query param is required" });
-
-    const cookiesPath = ensureCookiesFile();
-
-    const dir = path.join(process.cwd(), "downloads");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    const log = await downloadVideo(url, cookiesPath);
-    res.json({ ok: true, log: (log || "").slice(-4000) });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-//
-// ✅ POST-версии для фронта (как и было)
-//
-
-app.post("/api/youtube/info", async (req, res) => {
-  try {
-    const { url } = req.body || {};
+    const { url, chat_id } = req.body || {};
     if (!url) return res.status(400).json({ ok: false, error: "url is required" });
+    if (!chat_id) return res.status(400).json({ ok: false, error: "chat_id is required" });
 
     const cookiesPath = ensureCookiesFile();
+
+    // 1) получаем мету (название для подписи)
     const info = await getInfo(url, cookiesPath);
 
-    res.json({
-      ok: true,
-      title: info.title,
-      duration: info.duration,
-      uploader: info.uploader,
-      id: info.id
+    // 2) скачиваем и узнаём путь к файлу
+    const { filePath } = await downloadVideoAndGetPath(url, cookiesPath);
+
+    // 3) отправляем пользователю
+    const tgResult = await sendMediaToUser({
+      chat_id,
+      filePath,
+      title: info.title
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
 
-app.post("/api/youtube/download", async (req, res) => {
-  try {
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json({ ok: false, error: "url is required" });
-
-    const cookiesPath = ensureCookiesFile();
-
-    const dir = path.join(process.cwd(), "downloads");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    const log = await downloadVideo(url, cookiesPath);
-    res.json({ ok: true, log: (log || "").slice(-4000) });
+    res.json({ ok: true, telegram: tgResult });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -122,7 +87,4 @@ app.post("/api/youtube/download", async (req, res) => {
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
-
-app.listen(PORT, HOST, () => {
-  console.log("Listening on", { HOST, PORT });
-});
+app.listen(PORT, HOST, () => console.log("Listening on", { HOST, PORT }));
