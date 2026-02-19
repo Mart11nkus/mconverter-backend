@@ -1,10 +1,10 @@
-c// yt.js
+// yt.js
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-// Универсальный запуск команд с захватом stdout/stderr
+// запуск команд с логами stdout/stderr
 function run(command, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -24,14 +24,13 @@ function run(command, args) {
   });
 }
 
-// /tmp — единственное место, куда безопасно писать на Render
+// Render-safe папка
 function ensureTmpDir() {
   const dir = path.join(os.tmpdir(), "mconverter");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-// чуть чистим имя файла от запрещённых символов
 function safeName(s) {
   return String(s || "")
     .replace(/[\/\\:*?"<>|]/g, "_")
@@ -50,24 +49,21 @@ async function getInfo(url, cookiesPath) {
     "--geo-bypass",
     "--dump-json",
     "--no-warnings",
-    url
+    url,
   ];
 
   const { out } = await run("yt-dlp", args);
   return JSON.parse(out);
 }
 
-// ✅ скачиваем видео, кладём в /tmp/mconverter, возвращаем реальный путь
+// скачиваем и возвращаем РЕАЛЬНЫЙ путь
 async function downloadVideoAndGetPath(url, cookiesPath) {
   const outDir = ensureTmpDir();
 
-  // сначала возьмём info, чтобы сделать предсказуемое имя
   let info = null;
   try {
     info = await getInfo(url, cookiesPath);
-  } catch (_) {
-    // не критично, имя сделаем по времени
-  }
+  } catch (_) {}
 
   const base = safeName(info?.title || "video");
   const id = safeName(info?.id || String(Date.now()));
@@ -85,36 +81,29 @@ async function downloadVideoAndGetPath(url, cookiesPath) {
     "--merge-output-format", "mp4",
 
     "-o", outTemplate,
-
-    // печатаем путь реально созданного файла
     "--print", "after_move:filepath",
     "--no-warnings",
-    url
+    url,
   ];
 
   const { out, err } = await run("yt-dlp", args);
 
-  // yt-dlp может печатать много строк, берём последнюю непустую
   const lines = out.split("\n").map(s => s.trim()).filter(Boolean);
-  const filePath = lines[lines.length - 1];
+  const printedPath = lines[lines.length - 1];
 
-  if (!filePath) {
+  if (!printedPath) {
     throw new Error(`Cannot determine downloaded file path.\n${(err || out).slice(-4000)}`);
   }
 
-  // ✅ главное: проверяем что файл реально существует
+  const filePath = path.isAbsolute(printedPath) ? printedPath : path.join(outDir, printedPath);
+
   if (!fs.existsSync(filePath)) {
-    // иногда yt-dlp печатает относительный путь — попробуем резолвить относительно outDir
-    const alt = path.isAbsolute(filePath) ? filePath : path.join(outDir, filePath);
-    if (!fs.existsSync(alt)) {
-      throw new Error(
-        `Downloaded file does not exist.\n` +
-        `filePath="${filePath}"\n` +
-        `alt="${alt}"\n` +
-        `${(err || out).slice(-4000)}`
-      );
-    }
-    return { filePath: alt, log: out };
+    throw new Error(
+      `Downloaded file does not exist.\n` +
+      `printed="${printedPath}"\n` +
+      `resolved="${filePath}"\n` +
+      `${(err || out).slice(-4000)}`
+    );
   }
 
   return { filePath, log: out };
