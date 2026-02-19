@@ -1,23 +1,29 @@
+// src/cookies.js
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 function ensureCookiesFile() {
-  const secretPath = "/etc/secrets/cookies.txt";
-  const localPath = path.join(process.cwd(), "cookies.txt");
+  const cookiesText = process.env.YTDLP_COOKIES;
 
-  if (fs.existsSync(secretPath)) {
-    // копируем из read-only secret в обычный файл (writable)
-    fs.copyFileSync(secretPath, localPath);
-    return localPath;
+  if (!cookiesText || !cookiesText.trim()) {
+    throw new Error(
+      "YTDLP_COOKIES env is missing. Add it in Render Environment (paste full cookies.txt content)."
+    );
   }
 
-  const raw = process.env.YT_COOKIES;
-  if (!raw || raw.trim().length < 50) {
-    throw new Error("Cookies missing: add Render Secret File cookies.txt OR set YT_COOKIES env var.");
+  // Render-safe path
+  const p = path.join(os.tmpdir(), "mconverter-cookies.txt");
+
+  // перезаписываем каждый раз (кукисы могли обновиться)
+  fs.writeFileSync(p, cookiesText, "utf8");
+
+  // маленькая проверка, что файл реально есть
+  if (!fs.existsSync(p)) {
+    throw new Error("Failed to create cookies file in /tmp");
   }
 
-  fs.writeFileSync(localPath, raw, { encoding: "utf8" });
-  return localPath;
+  return p;
 }
 
 module.exports = { ensureCookiesFile };
