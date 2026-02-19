@@ -7,32 +7,33 @@ const { ensureCookiesFile } = require("./cookies");
 const { run, getInfo, downloadVideoAndGetPath } = require("./yt");
 const { sendMediaToUser } = require("./tg");
 
+// чтобы Render показал настоящую причину падения
+process.on("unhandledRejection", (err) => {
+  console.error(new Date().toISOString(), "UNHANDLED_REJECTION:", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error(new Date().toISOString(), "UNCAUGHT_EXCEPTION:", err);
+  process.exit(1);
+});
+
 const app = express();
-
-/** ===== CORS ===== */
-app.use(
-  cors({
-    origin: true,
-    credentials: true,
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
-app.options("*", cors());
-
-/** ===== Body parsing ===== */
-app.use(express.json({ limit: "2mb" }));
-
-/** ===== Helpers ===== */
-function httpError(res, status, message, extra = {}) {
-  return res.status(status).json({ ok: false, error: message, ...extra });
-}
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
 }
 
+function httpError(res, status, message, extra = {}) {
+  return res.status(status).json({ ok: false, error: message, ...extra });
+}
+
+/** ===== CORS ===== */
+app.use(cors({ origin: true, credentials: true }));
+
+/** ===== Body parsing ===== */
+app.use(express.json({ limit: "2mb" }));
+
 /** ===== Routes ===== */
+app.get("/", (req, res) => res.send("ok"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/diag", async (req, res) => {
@@ -65,8 +66,8 @@ app.get("/api/youtube/info", async (req, res) => {
       id: info.id,
     });
   } catch (e) {
-    log("INFO ERROR:", e.message);
-    return httpError(res, 500, e.message);
+    log("INFO ERROR:", e?.message || String(e));
+    return httpError(res, 500, e?.message || "info failed");
   }
 });
 
@@ -101,18 +102,17 @@ app.post("/api/youtube/send", async (req, res) => {
     });
 
     log("TG SENT OK:", tgResult);
-
     return res.json({ ok: true, telegram: tgResult });
   } catch (e) {
-    log("SEND ERROR:", e.message);
-    return httpError(res, 500, e.message);
+    log("SEND ERROR:", e?.message || String(e));
+    return httpError(res, 500, e?.message || "send failed");
   } finally {
     if (filePath) {
       try {
         fs.unlinkSync(filePath);
         log("CLEANUP OK:", filePath);
       } catch (e) {
-        log("CLEANUP FAIL:", filePath, e.message);
+        log("CLEANUP FAIL:", filePath, e?.message || String(e));
       }
     }
   }
@@ -120,5 +120,4 @@ app.post("/api/youtube/send", async (req, res) => {
 
 /** ===== Server start ===== */
 const PORT = Number(process.env.PORT || 3000);
-const HOST = "0.0.0.0";
-app.listen(PORT, HOST, () => log("Listening on", { HOST, PORT }));
+app.listen(PORT, "0.0.0.0", () => log("Listening on", { PORT }));
