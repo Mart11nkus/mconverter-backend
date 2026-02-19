@@ -1,13 +1,11 @@
-// server.js
+// src/server.js
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
-
 const { ensureCookiesFile } = require("./cookies");
-const { run, getInfo, downloadVideoAndGetPath } = require("./yt");
+const { run, getInfo, downloadAudioAndGetPath } = require("./yt");
 const { sendMediaToUser } = require("./tg");
 
-// чтобы Render показал настоящую причину падения
 process.on("unhandledRejection", (err) => {
   console.error(new Date().toISOString(), "UNHANDLED_REJECTION:", err);
 });
@@ -26,13 +24,9 @@ function httpError(res, status, message, extra = {}) {
   return res.status(status).json({ ok: false, error: message, ...extra });
 }
 
-/** ===== CORS ===== */
 app.use(cors({ origin: true, credentials: true }));
-
-/** ===== Body parsing ===== */
 app.use(express.json({ limit: "2mb" }));
 
-/** ===== Routes ===== */
 app.get("/", (req, res) => res.send("ok"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -54,10 +48,8 @@ app.get("/api/youtube/info", async (req, res) => {
   try {
     const url = req.query.url;
     if (!url) return httpError(res, 400, "url query param is required");
-
     const cookiesPath = ensureCookiesFile();
     const info = await getInfo(url, cookiesPath);
-
     res.json({
       ok: true,
       title: info.title,
@@ -71,9 +63,9 @@ app.get("/api/youtube/info", async (req, res) => {
   }
 });
 
+// ✅ Главный эндпоинт — скачать аудио и отправить MP3 в Telegram
 app.post("/api/youtube/send", async (req, res) => {
   let filePath = null;
-
   try {
     const { url, chat_id } = req.body || {};
     if (!url) return httpError(res, 400, "url is required");
@@ -83,11 +75,10 @@ app.post("/api/youtube/send", async (req, res) => {
 
     const cookiesPath = ensureCookiesFile();
 
-    const info = await getInfo(url, cookiesPath);
-    log("INFO OK:", { title: info?.title, id: info?.id, duration: info?.duration });
-
-    const dl = await downloadVideoAndGetPath(url, cookiesPath);
+    // Скачиваем аудио как MP3
+    const dl = await downloadAudioAndGetPath(url, cookiesPath);
     filePath = dl.filePath;
+    const title = dl.title;
 
     log("DOWNLOADED:", { filePath, exists: fs.existsSync(filePath) });
 
@@ -95,13 +86,10 @@ app.post("/api/youtube/send", async (req, res) => {
       throw new Error(`Downloaded file not found: ${filePath || "(empty)"}`);
     }
 
-    const tgResult = await sendMediaToUser({
-      chat_id,
-      filePath,
-      title: info?.title || "video",
-    });
-
+    // Отправляем MP3 в Telegram
+    const tgResult = await sendMediaToUser({ chat_id, filePath, title });
     log("TG SENT OK:", tgResult);
+
     return res.json({ ok: true, telegram: tgResult });
   } catch (e) {
     log("SEND ERROR:", e?.message || String(e));
@@ -118,6 +106,5 @@ app.post("/api/youtube/send", async (req, res) => {
   }
 });
 
-/** ===== Server start ===== */
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, "0.0.0.0", () => log("Listening on", { PORT }));
