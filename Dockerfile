@@ -1,20 +1,15 @@
-FROM python:3.11-slim
+FROM node:20-bullseye
 
-# Стабильные SSL-сертификаты + ffmpeg (нужен и для конвертации и для yt-dlp)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    ca-certificates \
-    curl \
+RUN apt-get update \
+  && apt-get install -y ffmpeg python3 python3-pip \
   && rm -rf /var/lib/apt/lists/*
 
+RUN pip3 install -U yt-dlp
+
 WORKDIR /app
+COPY package*.json ./
+RUN npm install --omit=dev
+COPY . .
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY main.py .
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
-
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+ENV NODE_ENV=production
+CMD ["npm", "start"]
