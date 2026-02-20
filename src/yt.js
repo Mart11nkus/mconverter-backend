@@ -1,4 +1,4 @@
-// src/yt.js — использует RapidAPI YouTube MP3
+// src/yt.js — RapidAPI YouTube MP3 с повторными попытками
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -19,35 +19,74 @@ function safeName(s) {
     .slice(0, 120);
 }
 
+function extractYouTubeId(url) {
+  const match = url.match(
+    /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
+  );
+  if (!match) throw new Error("Не удалось извлечь ID видео из ссылки");
+  return match[1];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function downloadAudioAndGetPath(url) {
   if (!RAPIDAPI_KEY) throw new Error("RAPIDAPI_KEY не задан в переменных окружения");
 
-  // 1. Запрашиваем ссылку на MP3
-  const searchRes = await fetch(
-    `https://youtube-mp36.p.rapidapi.com/dl?id=${extractYouTubeId(url)}`,
-    {
-      method: "GET",
-      headers: {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
-      },
+  const videoId = extractYouTubeId(url);
+
+  // RapidAPI иногда конвертирует не сразу — опрашиваем до 10 раз
+  let mp3Url = null;
+  let title = "audio";
+
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    console.log(`RapidAPI attempt ${attempt} for ${videoId}`);
+
+    const res = await fetch(
+      `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
+      {
+        method: "GET",
+        headers: {
+          "X-RapidAPI-Key": RAPIDAPI_KEY,
+          "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
+        },
+      }
+    );
+
+    if (!res.ok) {
+      throw new Error(`RapidAPI HTTP error: ${res.status}`);
     }
-  );
 
-  if (!searchRes.ok) {
-    throw new Error(`RapidAPI HTTP error: ${searchRes.status}`);
-  }
+    const data = await res.json();
+    console.log(`RapidAPI response:`, JSON.stringify(data).slice(0, 200));
 
-  const data = await searchRes.json();
+    if (data.status === "ok" && data.link) {
+      mp3Url = data.link;
+      title = safeName(data.title || "audio");
+      break;
+    }
 
-  if (data.status !== "ok" || !data.link) {
+    // Если статус processing/progress — ждём и пробуем снова
+    if (
+      data.status === "processing" ||
+      data.status === "progress" ||
+      data.msg?.includes("processing") ||
+      data.msg?.includes("progress")
+    ) {
+      await sleep(3000);
+      continue;
+    }
+
+    // Любая другая ошибка — бросаем
     throw new Error(`RapidAPI error: ${data.msg || JSON.stringify(data)}`);
   }
 
-  const mp3Url = data.link;
-  const title = safeName(data.title || "audio");
+  if (!mp3Url) {
+    throw new Error("RapidAPI: видео конвертируется слишком долго, попробуй ещё раз");
+  }
 
-  // 2. Скачиваем MP3 файл
+  // Скачиваем MP3
   const outDir = ensureTmpDir();
   const filePath = path.join(outDir, `${title}_${Date.now()}.mp3`);
 
@@ -64,14 +103,6 @@ async function downloadAudioAndGetPath(url) {
   }
 
   return { filePath, title };
-}
-
-function extractYouTubeId(url) {
-  const match = url.match(
-    /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
-  );
-  if (!match) throw new Error("Не удалось извлечь ID видео из ссылки");
-  return match[1];
 }
 
 module.exports = { downloadAudioAndGetPath };
