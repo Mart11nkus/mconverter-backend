@@ -1,10 +1,30 @@
-// src/yt.js — YouTube MP3 Audio Video Downloader (Spicy-Laika) с polling
+// src/yt.js — yt-dlp с PO Token (обход YouTube без cookies)
+const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-const RAPIDAPI_HOST = "youtube-mp3-audio-video-downloader.p.rapidapi.com";
+const PO_TOKEN = process.env.PO_TOKEN;
+const VISITOR_DATA = process.env.VISITOR_DATA;
+
+function ytDlpBin() {
+  return path.join(process.cwd(), "bin", "yt-dlp");
+}
+
+function run(command, args) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.stderr.on("data", (d) => (err += d.toString()));
+    p.on("error", (e) => reject(new Error(`${command} spawn error: ${e.message}`)));
+    p.on("close", (code) => {
+      if (code === 0) return resolve({ out, err });
+      reject(new Error((err || out || `exit code ${code}`).slice(-3000)));
+    });
+  });
+}
 
 function ensureTmpDir() {
   const dir = path.join(os.tmpdir(), "mconverter");
@@ -20,98 +40,56 @@ function safeName(s) {
     .slice(0, 120);
 }
 
-function extractYouTubeId(url) {
-  const match = url.match(
-    /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
-  );
-  if (!match) throw new Error("Не удалось извлечь ID видео из ссылки");
-  return match[1];
+async function getInfo(url) {
+  const args = buildArgs(url, ["--dump-json", "--no-warnings"]);
+  const { out } = await run(ytDlpBin(), args);
+  return JSON.parse(out);
 }
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+function buildArgs(url, extra = []) {
+  const args = [
+    "--add-header", "User-Agent: Mozilla/5.0",
+    "--geo-bypass",
+    "--no-warnings",
+  ];
 
-async function getMp3Url(videoId) {
-  // Первый запрос — API начинает готовить файл
-  // Потом повторяем каждые 15 сек пока не получим ссылку (макс 5 минут)
-  const maxAttempts = 20;
-  const delayMs = 15000; // 15 секунд между попытками
-
-  for (let i = 0; i < maxAttempts; i++) {
-    if (i > 0) {
-      console.log(`Попытка ${i + 1}/${maxAttempts}, ждём...`);
-      await sleep(delayMs);
-    }
-
-    const apiRes = await fetch(
-      `https://${RAPIDAPI_HOST}/get_mp3_download_link/${videoId}?quality=low&wait_until_the_file_is_ready=false`,
-      {
-        method: "GET",
-        headers: {
-          "X-RapidAPI-Key": RAPIDAPI_KEY,
-          "X-RapidAPI-Host": RAPIDAPI_HOST,
-        },
-      }
-    );
-
-    if (!apiRes.ok) {
-      throw new Error(`RapidAPI HTTP error: ${apiRes.status}`);
-    }
-
-    const data = await apiRes.json();
-    console.log(`Ответ API (попытка ${i + 1}):`, JSON.stringify(data).slice(0, 200));
-
-    // Если есть ссылка — возвращаем
-    const mp3Url = data.url || data.link || data.download_url || data.mp3_url;
-    if (mp3Url && !data.comment) {
-      return { mp3Url, title: safeName(data.title || data.name || "audio") };
-    }
-
-    // Если API говорит "скоро будет готово" — ждём и повторяем
-    if (data.comment && data.comment.includes("will soon be ready")) {
-      continue;
-    }
-
-    throw new Error(`Неожиданный ответ API: ${JSON.stringify(data).slice(0, 300)}`);
+  // Если есть PO Token — используем его
+  if (PO_TOKEN && VISITOR_DATA) {
+    args.push("--extractor-args", `youtube:po_token=web+${PO_TOKEN};visitor_data=${VISITOR_DATA}`);
   }
 
-  throw new Error("Таймаут: API слишком долго готовит файл (>5 минут)");
+  return [...args, ...extra, url];
 }
 
 async function downloadAudioAndGetPath(url) {
-  if (!RAPIDAPI_KEY) throw new Error("RAPIDAPI_KEY не задан в переменных окружения");
-
-  const videoId = extractYouTubeId(url);
-  console.log("Запрашиваем MP3 для videoId:", videoId);
-
-  const { mp3Url, title } = await getMp3Url(videoId);
-  console.log("Получили ссылку, скачиваем...");
-
-  // Скачиваем MP3
   const outDir = ensureTmpDir();
-  const filePath = path.join(outDir, `${title}_${Date.now()}.mp3`);
 
-  const fileRes = await fetch(mp3Url, {
-    redirect: "follow",
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; bot)",
-    },
-  });
+  let info = null;
+  try {
+    info = await getInfo(url);
+  } catch (_) {}
 
-  if (!fileRes.ok) {
-    throw new Error(`Ошибка скачивания MP3: ${fileRes.status}`);
+  const base = safeName(info?.title || "audio");
+  const id = safeName(info?.id || String(Date.now()));
+  const outPath = path.join(outDir, `${base} [${id}].mp3`);
+
+  const args = buildArgs(url, [
+    "-f", "bestaudio/best",
+    "--extract-audio",
+    "--audio-format", "mp3",
+    "--audio-quality", "192K",
+    "-o", outPath,
+    "--no-warnings",
+  ]);
+
+  const { out, err } = await run(ytDlpBin(), args);
+  console.log("yt-dlp out:", out.slice(0, 300));
+
+  if (!fs.existsSync(outPath)) {
+    throw new Error(`Файл не скачался: ${(err || out).slice(-2000)}`);
   }
 
-  const buffer = await fileRes.arrayBuffer();
-  fs.writeFileSync(filePath, Buffer.from(buffer));
-
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-    throw new Error("Файл пустой или не скачался");
-  }
-
-  console.log("Файл скачан:", filePath);
-  return { filePath, title };
+  return { filePath: outPath, title: info?.title || base };
 }
 
-module.exports = { downloadAudioAndGetPath };
+module.exports = { run, getInfo, downloadAudioAndGetPath };
