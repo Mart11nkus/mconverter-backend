@@ -1,9 +1,10 @@
-// src/yt.js — RapidAPI YouTube MP3 с повторными попытками
+// src/yt.js — YouTube MP3 Audio Video Downloader (Spicy-Laika)
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+const RAPIDAPI_HOST = "youtube-mp3-audio-video-downloader.p.rapidapi.com";
 
 function ensureTmpDir() {
   const dir = path.join(os.tmpdir(), "mconverter");
@@ -27,70 +28,50 @@ function extractYouTubeId(url) {
   return match[1];
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function downloadAudioAndGetPath(url) {
   if (!RAPIDAPI_KEY) throw new Error("RAPIDAPI_KEY не задан в переменных окружения");
 
   const videoId = extractYouTubeId(url);
 
-  // RapidAPI иногда конвертирует не сразу — опрашиваем до 10 раз
-  let mp3Url = null;
-  let title = "audio";
-
-  for (let attempt = 1; attempt <= 10; attempt++) {
-    console.log(`RapidAPI attempt ${attempt} for ${videoId}`);
-
-    const res = await fetch(
-      `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
-      {
-        method: "GET",
-        headers: {
-          "X-RapidAPI-Key": RAPIDAPI_KEY,
-          "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
-        },
-      }
-    );
-
-    if (!res.ok) {
-      throw new Error(`RapidAPI HTTP error: ${res.status}`);
+  // 1. Получаем прямую ссылку на MP3
+  // wait_until_the_file_is_ready=true — API сам ждёт пока файл готов
+  const apiRes = await fetch(
+    `https://${RAPIDAPI_HOST}/get_mp3_download_link/${videoId}?quality=low&wait_until_the_file_is_ready=true`,
+    {
+      method: "GET",
+      headers: {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_HOST,
+      },
     }
+  );
 
-    const data = await res.json();
-    console.log(`RapidAPI response:`, JSON.stringify(data).slice(0, 200));
-
-    if (data.status === "ok" && data.link) {
-      mp3Url = data.link;
-      title = safeName(data.title || "audio");
-      break;
-    }
-
-    // Если статус processing/progress — ждём и пробуем снова
-    if (
-      data.status === "processing" ||
-      data.status === "progress" ||
-      data.msg?.includes("processing") ||
-      data.msg?.includes("progress")
-    ) {
-      await sleep(3000);
-      continue;
-    }
-
-    // Любая другая ошибка — бросаем
-    throw new Error(`RapidAPI error: ${data.msg || JSON.stringify(data)}`);
+  if (!apiRes.ok) {
+    throw new Error(`RapidAPI HTTP error: ${apiRes.status}`);
   }
+
+  const data = await apiRes.json();
+  console.log("API response:", JSON.stringify(data).slice(0, 300));
+
+  // Достаём ссылку — может быть в разных полях
+  const mp3Url = data.url || data.link || data.download_url || data.mp3_url;
+  const title = safeName(data.title || data.name || "audio");
 
   if (!mp3Url) {
-    throw new Error("RapidAPI: видео конвертируется слишком долго, попробуй ещё раз");
+    throw new Error(`API не вернул ссылку на MP3: ${JSON.stringify(data).slice(0, 300)}`);
   }
 
-  // Скачиваем MP3
+  // 2. Скачиваем MP3
   const outDir = ensureTmpDir();
   const filePath = path.join(outDir, `${title}_${Date.now()}.mp3`);
 
-  const fileRes = await fetch(mp3Url);
+  const fileRes = await fetch(mp3Url, {
+    redirect: "follow",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; bot)",
+    },
+  });
+
   if (!fileRes.ok) {
     throw new Error(`Ошибка скачивания MP3: ${fileRes.status}`);
   }
