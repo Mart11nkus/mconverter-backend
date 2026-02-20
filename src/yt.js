@@ -1,7 +1,9 @@
-// src/yt.js — использует Cobalt API, cookies не нужны совсем
+// src/yt.js — использует RapidAPI YouTube MP3
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 
 function ensureTmpDir() {
   const dir = path.join(os.tmpdir(), "mconverter");
@@ -17,65 +19,59 @@ function safeName(s) {
     .slice(0, 120);
 }
 
-// Cobalt — бесплатный публичный API для скачивания аудио
-// Docs: https://github.com/imputnet/cobalt
 async function downloadAudioAndGetPath(url) {
-  // 1. Запрашиваем у Cobalt ссылку на аудио
-  const cobaltRes = await fetch("https://api.cobalt.tools/", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    body: JSON.stringify({
-      url: url,
-      downloadMode: "audio",   // только аудио
-      audioFormat: "mp3",      // формат MP3
-      audioBitrate: "192",     // качество
-    }),
-  });
+  if (!RAPIDAPI_KEY) throw new Error("RAPIDAPI_KEY не задан в переменных окружения");
 
-  if (!cobaltRes.ok) {
-    throw new Error(`Cobalt API HTTP error: ${cobaltRes.status}`);
+  // 1. Запрашиваем ссылку на MP3
+  const searchRes = await fetch(
+    `https://youtube-mp36.p.rapidapi.com/dl?id=${extractYouTubeId(url)}`,
+    {
+      method: "GET",
+      headers: {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
+      },
+    }
+  );
+
+  if (!searchRes.ok) {
+    throw new Error(`RapidAPI HTTP error: ${searchRes.status}`);
   }
 
-  const cobalt = await cobaltRes.json();
+  const data = await searchRes.json();
 
-  // Cobalt возвращает status: "tunnel" или "redirect" со ссылкой
-  if (cobalt.status === "error") {
-    throw new Error(`Cobalt error: ${cobalt.error?.code || JSON.stringify(cobalt)}`);
+  if (data.status !== "ok" || !data.link) {
+    throw new Error(`RapidAPI error: ${data.msg || JSON.stringify(data)}`);
   }
 
-  const audioUrl = cobalt.url;
-  if (!audioUrl) {
-    throw new Error(`Cobalt did not return a download URL: ${JSON.stringify(cobalt)}`);
-  }
+  const mp3Url = data.link;
+  const title = safeName(data.title || "audio");
 
-  // 2. Скачиваем файл по ссылке от Cobalt
+  // 2. Скачиваем MP3 файл
   const outDir = ensureTmpDir();
-  const fileName = `audio_${Date.now()}.mp3`;
-  const filePath = path.join(outDir, fileName);
+  const filePath = path.join(outDir, `${title}_${Date.now()}.mp3`);
 
-  const fileRes = await fetch(audioUrl);
+  const fileRes = await fetch(mp3Url);
   if (!fileRes.ok) {
-    throw new Error(`Failed to download audio file: ${fileRes.status}`);
+    throw new Error(`Ошибка скачивания MP3: ${fileRes.status}`);
   }
 
   const buffer = await fileRes.arrayBuffer();
   fs.writeFileSync(filePath, Buffer.from(buffer));
 
   if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-    throw new Error("Downloaded file is empty or missing");
+    throw new Error("Файл пустой или не скачался");
   }
 
-  // Пытаемся достать название из заголовков ответа
-  const disposition = fileRes.headers.get("content-disposition") || "";
-  const match = disposition.match(/filename\*?=["']?(?:UTF-8'')?([^"';\n]+)/i);
-  const title = match
-    ? decodeURIComponent(match[1]).replace(/\.mp3$/i, "").trim()
-    : safeName(cobalt.filename || "audio");
-
   return { filePath, title };
+}
+
+function extractYouTubeId(url) {
+  const match = url.match(
+    /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
+  );
+  if (!match) throw new Error("Не удалось извлечь ID видео из ссылки");
+  return match[1];
 }
 
 module.exports = { downloadAudioAndGetPath };
