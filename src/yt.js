@@ -1,30 +1,18 @@
-// src/yt.js — yt-dlp с PO Token (обход YouTube без cookies)
-const { spawn } = require("child_process");
+// src/yt.js — Invidious API (стабильно, без cookies и токенов)
+const https = require("https");
+const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const PO_TOKEN = process.env.PO_TOKEN;
-const VISITOR_DATA = process.env.VISITOR_DATA;
-
-function ytDlpBin() {
-  return path.join(process.cwd(), "bin", "yt-dlp");
-}
-
-function run(command, args) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    p.stdout.on("data", (d) => (out += d.toString()));
-    p.stderr.on("data", (d) => (err += d.toString()));
-    p.on("error", (e) => reject(new Error(`${command} spawn error: ${e.message}`)));
-    p.on("close", (code) => {
-      if (code === 0) return resolve({ out, err });
-      reject(new Error((err || out || `exit code ${code}`).slice(-3000)));
-    });
-  });
-}
+// Публичные Invidious серверы (fallback по очереди)
+const INVIDIOUS_INSTANCES = [
+  "https://invidious.privacydev.net",
+  "https://inv.nadeko.net",
+  "https://invidious.nerdvpn.de",
+  "https://yt.drgnz.club",
+  "https://invidious.fdn.fr",
+];
 
 function ensureTmpDir() {
   const dir = path.join(os.tmpdir(), "mconverter");
@@ -40,56 +28,130 @@ function safeName(s) {
     .slice(0, 120);
 }
 
-async function getInfo(url) {
-  const args = buildArgs(url, ["--dump-json", "--no-warnings"]);
-  const { out } = await run(ytDlpBin(), args);
-  return JSON.parse(out);
+function extractVideoId(url) {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+    /^([a-zA-Z0-9_-]{11})$/,
+  ];
+  for (const p of patterns) {
+    const m = url.match(p);
+    if (m) return m[1];
+  }
+  throw new Error("Не удалось извлечь ID видео из ссылки");
 }
 
-function buildArgs(url, extra = []) {
-  const args = [
-    "--add-header", "User-Agent: Mozilla/5.0",
-    "--geo-bypass",
-    "--no-warnings",
-  ];
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith("https") ? https : http;
+    const req = proto.get(url, { timeout: 15000, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(new Error("JSON parse error: " + e.message));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
+  });
+}
 
-  // Если есть PO Token — используем его
-  if (PO_TOKEN && VISITOR_DATA) {
-    args.push("--extractor-args", `youtube:po_token=web+${PO_TOKEN};visitor_data=${VISITOR_DATA}`);
+function downloadFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith("https") ? https : http;
+    const file = fs.createWriteStream(destPath);
+    
+    function doRequest(reqUrl, redirects = 0) {
+      if (redirects > 5) return reject(new Error("Too many redirects"));
+      const p = reqUrl.startsWith("https") ? https : http;
+      p.get(reqUrl, { timeout: 120000, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
+          return doRequest(res.headers.location, redirects + 1);
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`Download HTTP ${res.statusCode}`));
+        }
+        res.pipe(file);
+        file.on("finish", () => file.close(resolve));
+        file.on("error", reject);
+      }).on("error", reject).on("timeout", () => reject(new Error("Download timeout")));
+    }
+    
+    doRequest(url);
+  });
+}
+
+async function getVideoInfo(videoId) {
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      console.log(`Trying instance: ${instance}`);
+      const data = await fetchJson(`${instance}/api/v1/videos/${videoId}?fields=title,adaptiveFormats,formatStreams`);
+      return { instance, data };
+    } catch (e) {
+      console.log(`Instance ${instance} failed: ${e.message}`);
+    }
   }
+  throw new Error("Все Invidious серверы недоступны. Попробуйте позже.");
+}
 
-  return [...args, ...extra, url];
+function findBestAudio(data) {
+  // Сначала ищем в adaptiveFormats (только аудио)
+  const audioFormats = (data.adaptiveFormats || [])
+    .filter(f => f.type && f.type.startsWith("audio/") && f.url)
+    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  
+  if (audioFormats.length > 0) return audioFormats[0];
+  
+  // Fallback — берём из обычных форматов (видео+аудио, скачаем всё)
+  const formats = (data.formatStreams || []).filter(f => f.url);
+  if (formats.length > 0) return formats[0];
+  
+  throw new Error("Не найдено аудио-форматов для этого видео");
+}
+
+async function getInfo(url) {
+  const videoId = extractVideoId(url);
+  const { data } = await getVideoInfo(videoId);
+  return {
+    id: videoId,
+    title: data.title || videoId,
+  };
 }
 
 async function downloadAudioAndGetPath(url) {
+  const videoId = extractVideoId(url);
+  console.log("Video ID:", videoId);
+
+  const { instance, data } = await getVideoInfo(videoId);
+  console.log("Got video info from:", instance);
+
+  const audioFormat = findBestAudio(data);
+  const title = data.title || videoId;
+  console.log("Audio format:", audioFormat.type, "bitrate:", audioFormat.bitrate);
+
   const outDir = ensureTmpDir();
+  const base = safeName(title);
+  
+  // Определяем расширение
+  let ext = "m4a";
+  if (audioFormat.type?.includes("webm") || audioFormat.type?.includes("opus")) ext = "webm";
+  else if (audioFormat.type?.includes("mp4")) ext = "m4a";
+  
+  const tmpPath = path.join(outDir, `${base}_${videoId}.${ext}`);
+  
+  console.log("Downloading to:", tmpPath);
+  await downloadFile(audioFormat.url, tmpPath);
+  console.log("Downloaded successfully");
 
-  let info = null;
-  try {
-    info = await getInfo(url);
-  } catch (_) {}
-
-  const base = safeName(info?.title || "audio");
-  const id = safeName(info?.id || String(Date.now()));
-  const outPath = path.join(outDir, `${base} [${id}].mp3`);
-
-  const args = buildArgs(url, [
-    "-f", "bestaudio/best",
-    "--extract-audio",
-    "--audio-format", "mp3",
-    "--audio-quality", "192K",
-    "-o", outPath,
-    "--no-warnings",
-  ]);
-
-  const { out, err } = await run(ytDlpBin(), args);
-  console.log("yt-dlp out:", out.slice(0, 300));
-
-  if (!fs.existsSync(outPath)) {
-    throw new Error(`Файл не скачался: ${(err || out).slice(-2000)}`);
+  if (!fs.existsSync(tmpPath)) {
+    throw new Error("Файл не скачался");
   }
 
-  return { filePath: outPath, title: info?.title || base };
+  return { filePath: tmpPath, title };
 }
 
-module.exports = { run, getInfo, downloadAudioAndGetPath };
+module.exports = { getInfo, downloadAudioAndGetPath };
