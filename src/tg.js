@@ -6,7 +6,7 @@ const FormData = require("form-data");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-async function sendMediaToUser({ chat_id, filePath, title }) {
+async function sendMediaToUser({ chat_id, filePath, title, thumbPath }) {
   const form = new FormData();
   form.append("chat_id", String(chat_id));
   form.append("title", title);
@@ -17,6 +17,12 @@ async function sendMediaToUser({ chat_id, filePath, title }) {
     filename: path.basename(filePath),
     contentType: "audio/mpeg",
   });
+  if (thumbPath && fs.existsSync(thumbPath)) {
+    form.append("thumbnail", fs.createReadStream(thumbPath), {
+      filename: "thumb.jpg",
+      contentType: "image/jpeg",
+    });
+  }
 
   return new Promise((resolve, reject) => {
     const req = https.request({
@@ -46,4 +52,3 @@ async function sendMediaToUser({ chat_id, filePath, title }) {
 
 module.exports = { sendMediaToUser };
 EOF
-pm2 restart mconverter
