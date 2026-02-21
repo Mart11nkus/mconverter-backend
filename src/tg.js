@@ -1,39 +1,49 @@
-// src/tg.js
+cat > /root/mconverter/src/tg.js << 'EOF'
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const FormData = require("form-data");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const BOT_NAME = "@Martinkusconverter_bot";
-
-async function tgRequest(method, formData) {
-  if (!BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    body: formData,
-    headers: formData.getHeaders(),
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
-  return data.result;
-}
 
 async function sendMediaToUser({ chat_id, filePath, title }) {
-  const caption = `🎵 ${title}\n\n${BOT_NAME}`.trim();
-
   const form = new FormData();
   form.append("chat_id", String(chat_id));
-  form.append("caption", caption);
   form.append("title", title);
-  form.append("performer", BOT_NAME);
-  // Отправляем как аудио — появится как музыкальный трек в чате
+  form.append("performer", "MartinkusConverter");
+  form.append("parse_mode", "HTML");
+  form.append("caption", `<a href="https://t.me/MartinkusConverter_bot">MConverter</a>`);
   form.append("audio", fs.createReadStream(filePath), {
     filename: path.basename(filePath),
     contentType: "audio/mpeg",
   });
 
-  return tgRequest("sendAudio", form);
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: "api.telegram.org",
+      path: `/bot${BOT_TOKEN}/sendAudio`,
+      method: "POST",
+      headers: form.getHeaders(),
+      timeout: 120000,
+    }, (res) => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (!json.ok) return reject(new Error("Telegram error: " + JSON.stringify(json)));
+          resolve(json);
+        } catch(e) {
+          reject(new Error("Telegram JSON parse error: " + data.slice(0, 200)));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Telegram timeout")); });
+    form.pipe(req);
+  });
 }
 
 module.exports = { sendMediaToUser };
+EOF
+pm2 restart mconverter
