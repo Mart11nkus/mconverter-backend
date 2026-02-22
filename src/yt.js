@@ -1,4 +1,3 @@
-cat > /root/mconverter/src/yt.js << 'EOF'
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -13,7 +12,7 @@ function ensureTmpDir() {
 }
 
 function safeName(s) {
-  return String(s || "").replace(/[\/\\:*?"<>|]/g, "_").replace(/\s+/g, " ").trim().slice(0, 120);
+  return String(s || "").replace(/[/\\:*?"<>|]/g, "_").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
 function run(args) {
@@ -32,6 +31,7 @@ function downloadThumb(url, destPath) {
     const proto = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(destPath);
     proto.get(url, { timeout: 15000 }, (res) => {
+      if (res.statusCode !== 200) { file.close(); return reject(new Error("thumb HTTP " + res.statusCode)); }
       res.pipe(file);
       file.on("finish", () => file.close(resolve));
       file.on("error", reject);
@@ -43,14 +43,17 @@ async function downloadAudioAndGetPath(url) {
   const outDir = ensureTmpDir();
   const outTemplate = path.join(outDir, "%(title)s [%(id)s].%(ext)s");
 
-  // Получаем info + thumbnail
   let thumbPath = null;
+  let videoTitle = null;
+
   try {
     const { out } = await run(["--dump-json", "--no-warnings", url]);
     const info = JSON.parse(out);
+    videoTitle = info.title;
     if (info.thumbnail) {
-      thumbPath = path.join(outDir, `thumb_${info.id}.jpg`);
+      thumbPath = path.join(outDir, "thumb_" + info.id + ".jpg");
       await downloadThumb(info.thumbnail, thumbPath);
+      console.log("Thumbnail downloaded:", thumbPath);
     }
   } catch(e) {
     console.log("thumb/info error:", e.message);
@@ -70,10 +73,9 @@ async function downloadAudioAndGetPath(url) {
   const { out } = await run(args);
   const filePath = out.trim().split("\n").pop();
   if (!filePath || !fs.existsSync(filePath)) throw new Error("Файл не найден после скачивания");
-  const title = safeName(path.basename(filePath).replace(/\s*\[[^\]]+\]\.mp3$/, "").replace(/\.mp3$/, ""));
-  console.log("Done:", filePath);
+  const title = videoTitle || safeName(path.basename(filePath).replace(/\s*\[[^\]]+\]\.mp3$/, "").replace(/\.mp3$/, ""));
+  console.log("Done:", filePath, "thumb:", thumbPath);
   return { filePath, title, thumbPath };
 }
 
 module.exports = { downloadAudioAndGetPath };
-EOF
