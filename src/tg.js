@@ -1,4 +1,3 @@
-cat > /root/mconverter/src/tg.js << 'EOF'
 const https = require("https");
 const fs = require("fs");
 const path = require("path");
@@ -12,7 +11,7 @@ async function sendMediaToUser({ chat_id, filePath, title, thumbPath }) {
   form.append("title", title);
   form.append("performer", "MartinkusConverter");
   form.append("parse_mode", "HTML");
-  form.append("caption", `<a href="https://t.me/MartinkusConverter_bot">MConverter</a>`);
+  form.append("caption", '<a href="https://t.me/MartinkusConverter_bot">MConverter</a>');
   form.append("audio", fs.createReadStream(filePath), {
     filename: path.basename(filePath),
     contentType: "audio/mpeg",
@@ -27,7 +26,7 @@ async function sendMediaToUser({ chat_id, filePath, title, thumbPath }) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: "api.telegram.org",
-      path: `/bot${BOT_TOKEN}/sendAudio`,
+      path: "/bot" + BOT_TOKEN + "/sendAudio",
       method: "POST",
       headers: form.getHeaders(),
       timeout: 120000,
@@ -40,15 +39,14 @@ async function sendMediaToUser({ chat_id, filePath, title, thumbPath }) {
           if (!json.ok) return reject(new Error("Telegram error: " + JSON.stringify(json)));
           resolve(json);
         } catch(e) {
-          reject(new Error("Telegram JSON parse error: " + data.slice(0, 200)));
+          reject(new Error("Parse error: " + data.slice(0, 200)));
         }
       });
     });
     req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("Telegram timeout")); });
+    req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
     form.pipe(req);
   });
 }
 
 module.exports = { sendMediaToUser };
-EOF
