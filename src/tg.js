@@ -38,7 +38,7 @@ async function sendMediaToUser({ chat_id, filePath, title, thumbPath }) {
           const json = JSON.parse(data);
           if (!json.ok) return reject(new Error("Telegram error: " + JSON.stringify(json)));
           resolve(json);
-        } catch(e) {
+        } catch (e) {
           reject(new Error("Parse error: " + data.slice(0, 200)));
         }
       });
