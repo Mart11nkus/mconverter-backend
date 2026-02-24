@@ -88,9 +88,9 @@ app.post("/download-by-url", async (req, res) => {
   })();
 });
 
-const uploadMiddleware = multer({ dest: ensureTmpDir(), limits: { fileSize: 500 * 1024 * 1024 } });
+const uploader = multer({ dest: ensureTmpDir(), limits: { fileSize: 500 * 1024 * 1024 } });
 
-app.post("/upload-mp4", uploadMiddleware.single("file"), async (req, res) => {
+app.post("/upload-mp4", uploader.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ ok: false, detail: "Файл не получен" });
   const initData = req.body && req.body.init_data;
   if (!initData) return res.status(400).json({ ok: false, detail: "Открой из Telegram" });
@@ -106,8 +106,8 @@ app.post("/upload-mp4", uploadMiddleware.single("file"), async (req, res) => {
   res.json({ ok: true, job_id: jobId });
   (async () => {
     const inputPath = req.file.path;
-    const origName = req.file.originalname || "audio.mp4";
-    const title = safeName(path.basename(origName, path.extname(origName)));
+    const originalName = req.file.originalname || "audio.mp4";
+    const title = safeName(path.basename(originalName, path.extname(originalName)));
     const outputPath = inputPath + ".mp3";
     try {
       setJob(jobId, { status: "converting" });
