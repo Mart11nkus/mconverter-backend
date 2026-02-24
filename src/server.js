@@ -1,4 +1,3 @@
-// src/server.js
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -36,7 +35,7 @@ function convertToMp3(inputPath, outputPath) {
     let err = "";
     p.stderr.on("data", d => err += d);
     p.on("error", reject);
-    p.on("close", code => code === 0 ? resolve() : reject(new Error("ffmpeg error: " + err.slice(-500))));
+    p.on("close", code => code === 0 ? resolve() : reject(new Error("ffmpeg: " + err.slice(-300))));
   });
 }
 
@@ -53,30 +52,22 @@ app.get("/job-status/:id", (req, res) => {
 });
 
 app.post("/download-by-url", async (req, res) => {
-  let url, initData;
-  const contentType = req.headers["content-type"] || "";
-  if (contentType.includes("multipart/form-data")) {
-    const upload = multer().none();
-    await new Promise((resolve, reject) => upload(req, res, err => err ? reject(err) : resolve()));
-  }
-  url = req.body?.url;
-  initData = req.body?.init_data;
-
+  const upload = multer().none();
+  await new Promise((resolve, reject) => upload(req, res, err => err ? reject(err) : resolve()));
+  const url = req.body && req.body.url;
+  const initData = req.body && req.body.init_data;
   if (!url) return res.status(400).json({ ok: false, detail: "url is required" });
   if (!initData) return res.status(400).json({ ok: false, detail: "Открой из Telegram" });
-
   let chat_id;
   try {
     const params = new URLSearchParams(initData);
     const user = JSON.parse(params.get("user"));
     chat_id = user.id;
   } catch (e) {
-    return res.status(400).json({ ok: false, detail: "Не удалось получить user из Telegram" });
+    return res.status(400).json({ ok: false, detail: "Не удалось получить user" });
   }
-
   const jobId = createJob();
   res.json({ ok: true, job_id: jobId });
-
   (async () => {
     let filePath = null;
     try {
@@ -88,55 +79,50 @@ app.post("/download-by-url", async (req, res) => {
       await sendMediaToUser({ chat_id, filePath, title: dl.title, thumbPath: dl.thumbPath });
       setJob(jobId, { status: "done" });
     } catch (e) {
-      log("ERROR:", e?.message);
-      setJob(jobId, { status: "error", error: e?.message || "unknown error" });
+      log("ERROR:", e && e.message);
+      setJob(jobId, { status: "error", error: (e && e.message) || "unknown" });
     } finally {
       if (filePath) try { fs.unlinkSync(filePath); } catch (_) {}
-      setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
+      setTimeout(() => jobs.delete(jobId), 600000);
     }
   })();
 });
 
-// MP4 → MP3 конвертация
-const upload = multer({ dest: ensureTmpDir(), limits: { fileSize: 200 * 1024 * 1024 } });
+const uploadMiddleware = multer({ dest: ensureTmpDir(), limits: { fileSize: 500 * 1024 * 1024 } });
 
-app.post("/upload-mp4", upload.single("file"), async (req, res) => {
+app.post("/upload-mp4", uploadMiddleware.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ ok: false, detail: "Файл не получен" });
-
-  const initData = req.body?.init_data;
+  const initData = req.body && req.body.init_data;
   if (!initData) return res.status(400).json({ ok: false, detail: "Открой из Telegram" });
-
   let chat_id;
   try {
     const params = new URLSearchParams(initData);
     const user = JSON.parse(params.get("user"));
     chat_id = user.id;
   } catch (e) {
-    return res.status(400).json({ ok: false, detail: "Не удалось получить user из Telegram" });
+    return res.status(400).json({ ok: false, detail: "Не удалось получить user" });
   }
-
   const jobId = createJob();
   res.json({ ok: true, job_id: jobId });
-
   (async () => {
     const inputPath = req.file.path;
-    const title = safeName(path.basename(req.file.originalname, path.extname(req.file.originalname)));
+    const origName = req.file.originalname || "audio.mp4";
+    const title = safeName(path.basename(origName, path.extname(origName)));
     const outputPath = inputPath + ".mp3";
-
     try {
       setJob(jobId, { status: "converting" });
-      log("CONVERTING:", { inputPath, title, chat_id });
+      log("CONVERTING:", { title, chat_id });
       await convertToMp3(inputPath, outputPath);
       setJob(jobId, { status: "sending" });
       await sendMediaToUser({ chat_id, filePath: outputPath, title, thumbPath: null });
       setJob(jobId, { status: "done" });
     } catch (e) {
-      log("ERROR:", e?.message);
-      setJob(jobId, { status: "error", error: e?.message || "unknown error" });
+      log("ERROR:", e && e.message);
+      setJob(jobId, { status: "error", error: (e && e.message) || "unknown" });
     } finally {
       try { fs.unlinkSync(inputPath); } catch (_) {}
       try { fs.unlinkSync(outputPath); } catch (_) {}
-      setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
+      setTimeout(() => jobs.delete(jobId), 600000);
     }
   })();
 });
